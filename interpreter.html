@@ -11,6 +11,7 @@
     --me:#0e7490; --them:#334155; --accent:#22d3ee; --danger:#ef4444; --ok:#22c55e;
   }
   *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%;text-size-adjust:100%}  /* iOS Safari 會自動放大小字，關掉 */
   html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
     font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif}
   body{display:flex;flex-direction:column;
@@ -53,13 +54,18 @@
   #overlay.open{display:flex}
   #overlay small{position:absolute;bottom:24px;left:0;right:0;font-size:14px;color:#666}
   /* 除錯模式（網址加 #debug） */
-  #debug{display:none;border-top:1px solid var(--line);background:#020617}
+  /* 預設收合成一條細列，不擋住字幕；點一下才展開 */
+  #debug{display:none;flex:none;border-top:1px solid var(--line);background:#020617}
   #debug.open{display:block}
-  #debug .bar{display:flex;gap:8px;align-items:center;padding:6px 10px;font-size:12px;color:var(--muted)}
-  #debug .bar span{flex:1}
-  #debug .bar button{padding:3px 10px;font-size:12px}
-  #debugLog{margin:0;padding:6px 10px;max-height:32vh;overflow:auto;font:11px/1.45 ui-monospace,Menlo,Consolas,monospace;
+  #debug .bar{display:flex;gap:6px;align-items:center;padding:4px 10px;font-size:12px;color:var(--muted)}
+  #debugToggle{flex:1;min-width:0;text-align:left;background:none;border:none;color:inherit;font-size:12px;padding:4px 0;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #debugToggle.has-err{color:#fca5a5}
+  #debug .bar .iconbtn{padding:2px 8px;font-size:12px;border-radius:8px}
+  #debug:not(.expanded) .bar .iconbtn{display:none}
+  #debugLog{display:none;margin:0;padding:4px 10px 6px;max-height:25vh;overflow:auto;font:11px/1.4 ui-monospace,Menlo,Consolas,monospace;
     white-space:pre-wrap;word-break:break-all;color:#cbd5e1}
+  #debug.expanded #debugLog{display:block}
   #debugLog .in{color:#a5f3fc}#debugLog .out{color:#fde68a}#debugLog .err{color:#fca5a5}
 </style>
 </head>
@@ -101,7 +107,7 @@
 <main id="log"><div class="empty" id="empty">按下「開始口譯」，對著手機說話<br>點一下翻譯泡泡可以放大給對方看</div></main>
 
 <section id="debug">
-  <div class="bar"><span>除錯紀錄（← 收到、→ 送出、✕ 錯誤 / 關閉）</span>
+  <div class="bar"><button id="debugToggle">▸ 除錯紀錄（0）</button>
     <button class="iconbtn" id="debugCopy">複製</button><button class="iconbtn" id="debugClear">清除</button></div>
   <pre id="debugLog"></pre>
 </section>
@@ -186,8 +192,24 @@
     debugLog.appendChild(line);
     while (debugLog.childNodes.length > DEBUG_MAX) debugLog.firstChild.remove();
     if (atBottom) debugLog.scrollTop = debugLog.scrollHeight;
+    debugCount++;
+    if (kind === 'err') { lastErr = line.textContent.slice(13, 90); }
+    updateDebugBar();
   }
-  $('debugClear').onclick = () => { debugLog.textContent = ''; };
+  // 收合時的細列：顯示筆數和最新一則錯誤，不用展開也知道有沒有出事
+  let debugCount = 0, lastErr = '';
+  const debugToggle = $('debugToggle');
+  function updateDebugBar(){
+    const open = debugBox.classList.contains('expanded');
+    debugToggle.textContent = (open ? '▾ ' : '▸ ') + '除錯紀錄（' + debugCount + '）' + (lastErr && !open ? '　✕ ' + lastErr : '');
+    debugToggle.classList.toggle('has-err', !!lastErr && !open);
+  }
+  debugToggle.onclick = () => {
+    const open = debugBox.classList.toggle('expanded');
+    if (open) { lastErr = ''; debugLog.scrollTop = debugLog.scrollHeight; }
+    updateDebugBar();
+  };
+  $('debugClear').onclick = () => { debugLog.textContent = ''; debugCount = 0; lastErr = ''; updateDebugBar(); };
   $('debugCopy').onclick = async () => {
     try { await navigator.clipboard.writeText(debugLog.innerText); dbg('sys', '[已複製到剪貼簿]'); }
     catch (e) { dbg('err', '[複製失敗] ' + (e && e.message || e)); }
