@@ -95,12 +95,19 @@
     <option value="toMe">只翻成我的語言</option>
   </select>
   <label class="check"><input type="checkbox" id="speak" checked> 播放翻譯語音（關掉就只看字幕）</label>
+  <label for="wait">翻譯語音什麼時候播</label>
+  <select id="wait">
+    <option value="0">即時（邊說邊播，最快但會打斷說話的人）</option>
+    <option value="700">說完停 0.7 秒後播</option>
+    <option value="1200">說完停 1.2 秒後播（建議）</option>
+    <option value="2000">說完停 2 秒後播（說話常停頓的人）</option>
+  </select>
   <label for="model">模型名稱（進階，通常不用改）</label>
   <input id="model" type="text" autocomplete="off">
   <p class="note">
     API key 在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 免費申請。
     依 Google 條款，免費方案的內容可能會被用來改善 Google 的產品，所以請不要用來翻譯可辨識病人身分的資訊。<br>
-    播放語音時會暫停收音，避免翻譯聲又被麥克風收進去。
+    字幕會邊說邊出現；語音預設等說話的人停下來才播。播放語音時會暫停收音，避免翻譯聲又被麥克風收進去。
   </p>
 </section>
 
@@ -139,7 +146,7 @@
   const $ = id => document.getElementById(id);
   const el = {
     settings:$('settings'), apiKey:$('apiKey'), langMe:$('langMe'), langOther:$('langOther'),
-    mode:$('mode'), speak:$('speak'), model:$('model'), log:$('log'), empty:$('empty'),
+    mode:$('mode'), speak:$('speak'), wait:$('wait'), model:$('model'), log:$('log'), empty:$('empty'),
     dot:$('dot'), statusText:$('statusText'), main:$('main'), overlay:$('overlay'), overlayText:$('overlayText')
   };
 
@@ -162,11 +169,15 @@
   el.langOther.onchange = () => store.set('other', el.langOther.value);
   el.mode.onchange = () => store.set('mode', el.mode.value);
   el.speak.onchange = () => store.set('speak', el.speak.checked ? '1' : '0');
+  el.wait.value = store.get('wait', '1200');
+  if (!el.wait.value) el.wait.value = '1200';
+  el.wait.onchange = () => store.set('wait', el.wait.value);
   el.model.onchange = () => store.set('model', el.model.value.trim() || DEFAULT_MODEL);
   if (!el.apiKey.value) el.settings.classList.add('open');
   $('toggleSettings').onclick = () => el.settings.classList.toggle('open');
 
   function setStatus(text, kind){
+    if (el.statusText.textContent === text && el.dot.className === 'dot' + (kind ? ' ' + kind : '')) return;
     el.statusText.textContent = text;
     el.dot.className = 'dot' + (kind ? ' ' + kind : '');
     dbg('sys', '[狀態] ' + text);
@@ -218,7 +229,7 @@
   // ---------- 狀態 ----------
   const S = {
     running:false, sessions:[], ctx:null, stream:null, source:null, node:null, sink:null,
-    nextPlay:0, playUntil:0, silentRun:0, playOwner:null, wakeLock:null
+    nextPlay:0, playUntil:0, silentRun:0, playOwner:null, pending:[], lastVoice:0, noise:0, wakeLock:null
   };
 
   // ---------- 工具 ----------
@@ -250,21 +261,60 @@
     for (let i = 0; i < pcm.length; i++) if (pcm[i] > SILENT_PEAK || pcm[i] < -SILENT_PEAK) return true;
     return false;
   }
+  // ---------- 說話偵測：用麥克風音量判斷「還有人在說話」 ----------
+  // 模型是同步口譯，會邊聽邊翻。如果翻譯語音馬上播，麥克風就會被換成靜音（避免回授），
+  // 說話的人後半句會被吃掉。所以預設先把翻譯語音暫存，等麥克風安靜超過設定時間才播。
+  // 噪音底線：從 NOISE_INIT 開始（不能用第一包的音量，一開口就說話的話，說話聲會被當成噪音），
+  // 變小時很快跟上，變大時很慢（約 50 秒），上限 NOISE_MAX。門檻＝底線 × 2.5，至少 VOICE_MIN。
+  const VOICE_MIN = 0.01, NOISE_INIT = 0.003, NOISE_MAX = 0.04;
+  function trackVoice(int16){
+    let sq = 0;
+    for (let i = 0; i < int16.length; i++) { const v = int16[i] / 32768; sq += v * v; }
+    const rms = Math.sqrt(sq / int16.length);
+    const n = S.noise || NOISE_INIT;
+    S.noise = Math.min(NOISE_MAX, rms < n ? n * 0.7 + rms * 0.3 : n * 0.998 + rms * 0.002);
+    if (rms > Math.max(VOICE_MIN, S.noise * 2.5)) S.lastVoice = performance.now();
+  }
+  const waitMs = () => Number(el.wait.value) || 0;
+  const userSpeaking = () => waitMs() > 0 && performance.now() - S.lastVoice < waitMs();
+  const PENDING_MAX = 240;        // 最多暫存 60 秒，超過就直接播
+
+  // 說話的人停下來了 → 把暫存的翻譯語音一次排進播放
+  function flushPending(){
+    if (!S.pending.length || (userSpeaking() && S.pending.length < PENDING_MAX)) return;
+    const items = S.pending; S.pending = [];
+    dbg('sys', '[播放] 說話停了，開始播放暫存的 ' + items.length + ' 包（' + (items.length / 4).toFixed(1) + ' 秒）');
+    for (const it of items) schedule(it.pcm, it.audible, it.owner, 0.1);
+  }
+
   // owner：送來這包的連線。回傳 true 代表這包是有聲音的翻譯語音
   function playPcm(b64, owner){
     const pcm = base64ToInt16(b64);
     if (!pcm.length) return false;
     const audible = isAudible(pcm);
     if (!el.speak.checked || !S.ctx) return audible;
+    // 還沒開始播、而且有人還在說話（或前面已經有暫存）→ 先暫存
+    const idle = S.nextPlay <= S.ctx.currentTime;
+    if (S.pending.length || (idle && audible && userSpeaking())) {
+      if (!S.pending.length) dbg('sys', '[播放] 還有人在說話，翻譯語音先暫存');
+      S.pending.push({ pcm, audible, owner });
+      return audible;
+    }
+    schedule(pcm, audible, owner, START_DELAY);
+    return audible;
+  }
+
+  // 把一包語音排進播放時間軸（處理句中靜音和緩衝）
+  function schedule(pcm, audible, owner, startDelay){
     const now = S.ctx.currentTime;
     const idle = S.nextPlay <= now;
     if (!audible) {
       // 只有「正在播放的那條連線」的句中靜音才排入，另一條連線的靜音不能插進來
-      if (idle || owner !== S.playOwner || S.silentRun >= MAX_SILENT_RUN) return false;
+      if (idle || owner !== S.playOwner || S.silentRun >= MAX_SILENT_RUN) return;
       S.silentRun++;
     } else {
       // 句子還沒結束（不是因為句尾靜音而停）卻已經播完 → 網路晚到造成斷音
-      if (idle && S.nextPlay > 0 && now - S.nextPlay < 1 && S.silentRun < MAX_SILENT_RUN) {
+      if (idle && startDelay === START_DELAY && S.nextPlay > 0 && now - S.nextPlay < 1 && S.silentRun < MAX_SILENT_RUN) {
         dbg('err', '[播放] 緩衝用完，語音晚到 ' + Math.round((now - S.nextPlay) * 1000) + 'ms（會聽到斷音）');
       }
       if (!idle && owner !== S.playOwner) dbg('sys', '[播放] 另一條連線也有語音，排在後面播');
@@ -277,11 +327,10 @@
     const src = S.ctx.createBufferSource();
     src.buffer = buf;
     src.connect(S.ctx.destination);
-    const t = idle ? now + START_DELAY : S.nextPlay;
+    const t = idle ? now + startDelay : S.nextPlay;
     src.start(t);
     S.nextPlay = t + buf.duration;
     if (audible) S.playUntil = S.nextPlay;   // 只有真的有聲音才延長「播放中」（決定麥克風要不要換成靜音）
-    return audible;
   }
 
   // 語言代碼取主要部分來比較：zh-Hant / zh-Hans / zh 都算 zh
@@ -417,7 +466,7 @@
           if (p.inlineData && p.inlineData.data && playPcm(p.inlineData.data, this)) audible = true;
         }
         if (audible) {
-          if (el.speak.checked) setStatus('播放翻譯中…', 'speak');
+          if (el.speak.checked) setStatus(S.pending.length ? '翻譯好了，等說完再播…' : '播放翻譯中…', 'speak');
           this.touch();
         }
       }
@@ -429,6 +478,8 @@
     touch(ms = 1800){
       clearTimeout(this.idle);
       this.idle = setTimeout(() => {
+        // 還有人在說話、翻譯語音還在暫存或還在播 → 這句還沒完，泡泡先別收尾
+        if (S.running && (S.pending.length || isPlaying() || performance.now() - S.lastVoice < 1500)) { this.touch(ms); return; }
         this.resetTurn();
         if (S.running && S.sessions.every(s => s.ready)) setStatus('聆聽中…請說話', 'on');
       }, ms);
@@ -477,6 +528,8 @@
 
   function onChunk(int16){
     if (!S.running) return;
+    trackVoice(int16);          // 用真正的麥克風音量判斷有沒有人在說話（要在換成靜音之前）
+    flushPending();
     // 播放翻譯語音時送靜音，避免喇叭聲被收進去又翻一次
     if (el.speak.checked && isPlaying()) int16 = new Int16Array(int16.length);
     const b64 = int16ToBase64(int16);
@@ -533,6 +586,7 @@
       S.ctx = new (window.AudioContext || window.webkitAudioContext)();
       await S.ctx.resume();
       S.nextPlay = 0; S.playUntil = 0; S.silentRun = 0; S.playOwner = null;
+      S.pending = []; S.lastVoice = 0; S.noise = 0;
       await startMic();
     } catch (err) {
       setStatus('無法開啟麥克風：' + (err && err.message || err), 'err');
@@ -554,6 +608,7 @@
     if (S.stream) S.stream.getTracks().forEach(t => t.stop());
     if (S.ctx) { S.ctx.close().catch(() => {}); }
     S.ctx = S.stream = S.source = S.node = S.sink = null;
+    S.pending = [];
     if (S.wakeLock) { S.wakeLock.release().catch(() => {}); S.wakeLock = null; }
     el.main.textContent = '開始口譯'; el.main.classList.remove('stop');
     if (!keepStatus) setStatus('已停止');
