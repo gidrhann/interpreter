@@ -21,6 +21,11 @@ http.createServer(async (req, res) => {
     if (path === '/') path = '/interpreter.html';
     const file = normalize(join(ROOT, path));
     if (file !== ROOT && !file.startsWith(ROOT + sep)) { res.writeHead(403).end(); return; }
+    // 用 tunnel 公開時，絕不能送出 .env（API key）、.git、測試工具與測試輸出
+    const parts = file.slice(ROOT.length + 1).split(sep);
+    if (parts.some(p => p.startsWith('.')) || parts[0] === 'tools' || /\.md$/i.test(file)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('找不到檔案'); return;
+    }
     const body = await readFile(file);
     res.writeHead(200, { 'Content-Type': TYPES[extname(file).toLowerCase()] || 'application/octet-stream',
       'Cache-Control': 'no-store' });
