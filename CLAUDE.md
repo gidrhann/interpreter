@@ -38,6 +38,18 @@
 - 瀏覽器窗格沒有麥克風，也不能輸入真的 key。可以在頁面載入後用 JS 替換 `navigator.mediaDevices.getUserMedia`（OscillatorNode 當假麥克風）和 `window.WebSocket`（假伺服器），因為 app 是在按「開始」時才使用它們。
 - 沒設定 session resumption 也會收到 `sessionResumptionUpdate`，另外會收到 `usageMetadata`。
 
+## 部署（GitHub Pages）
+
+- 正式網址：https://gidrhann.github.io/interpreter/ （`index.html` 會轉到 `interpreter.html`，保留 `#debug`）
+- Repo：https://github.com/gidrhann/interpreter （public），Pages 來源是 `main` 分支根目錄，強制 HTTPS。
+- **部署流程：commit 後 `git push` 到 `main` 就好**，GitHub 會自動重新建置，約 1 分鐘後生效。
+  查建置狀態：`gh api repos/gidrhann/interpreter/pages/builds/latest --jq .status`（`built` 就是好了）。
+  這台電腦的 gh 在 `C:\Program Files\GitHub CLI\gh.exe`（PATH 可能還沒更新），帳號 `gidrhann`。
+- Service worker（`sw.js`）只快取 app 外殼，頁面採網路優先，所以一般更新重新整理就會生效。
+  **改了外殼檔案清單（`SHELL`）時，要把 `VERSION` 加一**，舊快取才會被清掉。翻譯 API 走 WebSocket，不經過 service worker。
+- Repo 是公開的：**絕不能 commit `.env` 或任何 key**；commit 前用 `git status` 確認，只指定檔名加入。
+- 手機測未部署的版本：本機 `node tools/serve.mjs 8080` ＋ `cloudflared tunnel --url http://localhost:8080`（`serve.mjs` 會擋掉 `.env`、`.git`、`tools/`、`.md`）。
+
 ## 開發與測試
 
 - 本機伺服器：`node tools/serve.mjs 8080`，開 `http://localhost:8080/#debug` 會顯示原始 server 訊息與 close code/reason。

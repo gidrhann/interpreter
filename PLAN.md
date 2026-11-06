@@ -112,6 +112,9 @@ repo 根目錄已經有 `interpreter.html`，是一個不需要建置的單一 H
 2. 加上 PWA 的 `manifest.json` 和 icon，讓 app 可以「加入主畫面」。service worker 只用來快取 app 外殼，**不要**快取 API 回應。
 3. 把部署流程寫進 CLAUDE.md。
 
+> ✅ 2026-11-06 部署到 GitHub Pages：https://gidrhann.github.io/interpreter/
+> （repo gidrhann/interpreter，public；PWA manifest、圖示、只快取外殼的 service worker 都已加上；流程見 CLAUDE.md）
+
 ### 階段 5：使用體驗（實測穩定後再做）
 
 - 一鍵對調「我的語言」和「對方語言」
