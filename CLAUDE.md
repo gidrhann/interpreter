@@ -33,6 +33,14 @@
 - 模型是**同步口譯**，邊聽邊翻，約 1 秒後就開始送翻譯語音。如果馬上播，播放期間麥克風會被換成靜音，說話的人後半句就會被吃掉（手機實測遇到）。所以預設用麥克風音量偵測說話，把翻譯語音暫存到說話停下來才播（設定「翻譯語音什麼時候播」，預設停 1.2 秒）。噪音底線不可以用第一包音量初始化，否則一開口就說話會永遠偵測不到。
 - 換語言時，上一句的翻譯（例如英文連線）和下一句的翻譯（繁中連線）可能同時在送。**兩條連線的語音不可以排在同一個時間軸上交錯**，否則會 250ms 中、250ms 英交替，聽起來是中英夾雜加雜訊（手機實測遇到）。每條連線各自一個佇列（`Session.q`），`pump()` 一次只播一條，播完才換下一條。
 
+## 字幕潤飾（文字模型）
+
+- 模型 `gemini-3.5-flash-lite`（官方文件標示 Stable、免費方案 Free of charge、適合翻譯；預設思考 minimal）。
+- `POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent`，key 放 `x-goog-api-key` header。
+  **瀏覽器可以直接呼叫（有 CORS）**，2026-11-06 用假 key 從頁面 fetch 確認讀得到 400 JSON。
+- 實測每句約 2～3 秒、約 80 token；`thinkingConfig.thinkingLevel: 'MINIMAL'` 可用。不要送 `temperature`（3.6+ 會忽略並警告）。
+- 每句泡泡收尾（`resetTurn`）時送原文逐字稿；照念原文被丟掉的句子不送。429 時暫停潤飾 1 分鐘。
+
 ## 測試小技巧
 
 - 瀏覽器窗格沒有麥克風，也不能輸入真的 key。可以在頁面載入後用 JS 替換 `navigator.mediaDevices.getUserMedia`（OscillatorNode 當假麥克風）和 `window.WebSocket`（假伺服器），因為 app 是在按「開始」時才使用它們。

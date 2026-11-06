@@ -45,6 +45,8 @@
   .msg .orig{font-size:calc(13px * var(--fs, 1));opacity:.75;margin-bottom:4px}
   .msg .trans{font-size:calc(19px * var(--fs, 1));line-height:1.45}
   .msg.live .trans::after{content:" ▍";opacity:.6}
+  .msg .live-trans{font-size:calc(12px * var(--fs, 1));opacity:.6;margin-top:6px;line-height:1.4}
+  .msg.polishing .trans::after{content:" ⋯";opacity:.6}
   footer{padding:12px 16px 16px;border-top:1px solid var(--line)}
   #status{font-size:13px;color:var(--muted);margin-bottom:10px;min-height:18px;display:flex;align-items:center;gap:8px}
   .dot{width:10px;height:10px;border-radius:50%;background:var(--muted);flex:none}
@@ -122,6 +124,7 @@
     <option value="ptt">按住說話（吵雜環境用，按鈕決定誰在說話）</option>
   </select>
   <label class="check"><input type="checkbox" id="speak" checked> 播放翻譯語音（關掉就只看字幕）</label>
+  <label class="check"><input type="checkbox" id="polish" checked> 字幕潤飾：每句說完後重翻成更通順的字幕（語音不變，會多用一點免費額度）</label>
   <label for="wait">翻譯語音什麼時候播</label>
   <select id="wait">
     <option value="0">即時（邊說邊播，最快但會打斷說話的人）</option>
@@ -190,7 +193,7 @@
   const $ = id => document.getElementById(id);
   const el = {
     settings:$('settings'), apiKey:$('apiKey'), langMe:$('langMe'), langOther:$('langOther'),
-    mode:$('mode'), input:$('input'), speak:$('speak'), wait:$('wait'), autoPause:$('autoPause'), model:$('model'), log:$('log'), empty:$('empty'),
+    mode:$('mode'), input:$('input'), speak:$('speak'), polish:$('polish'), wait:$('wait'), autoPause:$('autoPause'), model:$('model'), log:$('log'), empty:$('empty'),
     dot:$('dot'), statusText:$('statusText'), main:$('main'), overlay:$('overlay'), overlayText:$('overlayText')
   };
 
@@ -220,6 +223,8 @@
   if (!el.input.value) el.input.value = 'auto';
   el.input.onchange = () => store.set('input', el.input.value);
   el.speak.onchange = () => store.set('speak', el.speak.checked ? '1' : '0');
+  el.polish.checked = store.get('polish', '1') === '1';
+  el.polish.onchange = () => store.set('polish', el.polish.checked ? '1' : '0');
   el.wait.value = store.get('wait', '1200');
   if (!el.wait.value) el.wait.value = '1200';
   el.wait.onchange = () => store.set('wait', el.wait.value);
@@ -512,7 +517,8 @@
     const lines = [...el.log.querySelectorAll('.msg')].map(m => {
       const who = m.querySelector('.who').textContent;
       const orig = m.querySelector('.orig').textContent.trim();
-      const trans = m.querySelector('.trans').textContent.trim();
+      const live = m.querySelector('.live-trans');
+      const trans = m.querySelector('.trans').textContent.trim() + (live ? '\n即時翻譯：' + live.textContent.replace(/^即時：/, '').trim() : '');
       return ['[' + (m.dataset.time || '') + '] ' + who, '原文：' + orig, '翻譯：' + trans].join('\n');
     });
     if (!lines.length) { setStatus('還沒有對話紀錄可以複製'); return; }
@@ -536,6 +542,64 @@
     if (S.running) { stop(true); setStatus('語言已對調，重新連線中…'); await start(); }
     else setStatus('已對調：我的語言＝' + langName(el.langMe.value) + '，對方語言＝' + langName(el.langOther.value));
   };
+
+  // ---------- 字幕潤飾 ----------
+  // 同步口譯模型會照原文語序邊聽邊翻，譯文常常生硬（例：「音訊現在清楚了嗎，當你說英語的時候？」）。
+  // 每句結束後把「原文逐字稿」送給文字模型重翻一次，大字換成通順版本，小字保留即時版本。語音不變。
+  // 實測（2026-11-06）：gemini-3.5-flash-lite 免費方案可用，每句約 2～3 秒、80 token 左右；
+  // 瀏覽器可以直接呼叫（有 CORS），key 放在 x-goog-api-key header，不放網址。
+  const POLISH_MODEL = 'gemini-3.5-flash-lite';
+  const POLISH_URL = 'https://generativelanguage.googleapis.com/v1beta/models/' + POLISH_MODEL + ':generateContent';
+  let polishPausedUntil = 0;
+  const polishLangName = c => baseLang(c) === 'zh' ? (c === 'zh-Hans' ? '簡體中文' : '繁體中文（台灣用語）') : langName(c) + '（' + c + '）';
+  async function polishBubble(bubble, original, srcLang, targetLang){
+    if (!el.polish.checked || performance.now() < polishPausedUntil) return;
+    const key = el.apiKey.value.trim();
+    if (!key) return;
+    bubble.classList.add('polishing');
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    try {
+      const res = await fetch(POLISH_URL, {
+        method: 'POST', signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: '你是診所的醫療口譯員。把使用者給的口語原文（' + polishLangName(srcLang) + '）翻成自然、口語、正確的'
+            + polishLangName(targetLang) + '，照目標語言的習慣調整語序。原文是語音辨識結果，可能有錯字或斷句不完整，請依上下文合理理解。'
+            + '只輸出譯文，不要加任何說明、引號或註解。' }] },
+          contents: [{ role: 'user', parts: [{ text: original }] }],
+          generationConfig: { maxOutputTokens: 400, thinkingConfig: { thinkingLevel: 'MINIMAL' } }
+        })
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = (j.error && (j.error.status + ' ' + j.error.message)) || ('HTTP ' + res.status);
+        dbg('err', '[潤飾] 失敗：' + msg.slice(0, 160));
+        if (res.status === 429 || /RESOURCE_EXHAUSTED|quota/i.test(msg)) {
+          polishPausedUntil = performance.now() + 60000;
+          setStatus('字幕潤飾的免費額度暫時用完，先暫停 1 分鐘（口譯照常）', S.running ? 'on' : '');
+        }
+        return;
+      }
+      const text = ((j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [])
+        .map(p => p.text || '').join('').trim().replace(/^["「『“]+|["」』”]+$/g, '');
+      if (!text || !bubble.isConnected) return;
+      const transEl = bubble.querySelector('.trans');
+      const liveText = transEl.textContent.trim();
+      if (text === liveText) return;
+      transEl.textContent = text;
+      let live = bubble.querySelector('.live-trans');
+      if (!live) { live = document.createElement('div'); live.className = 'live-trans'; bubble.appendChild(live); }
+      live.textContent = '即時：' + liveText;
+      bubble.classList.add('polished');
+      dbg('sys', '[潤飾] ' + liveText.slice(0, 40) + ' → ' + text.slice(0, 40));
+    } catch (err) {
+      dbg('err', '[潤飾] 失敗：' + (err.name === 'AbortError' ? '逾時 10 秒' : (err && err.message || err)));
+    } finally {
+      clearTimeout(timer);
+      bubble.classList.remove('polishing');
+    }
+  }
 
   // ---------- 連線錯誤：翻成中文，並判斷要不要重試 ----------
   // 實測過的：無效 key → 1007 "API key not valid"；預付額度用完 → 1011 "prepayment credits are depleted"；
@@ -776,7 +840,14 @@
       }, ms);
     }
     resetTurn(){
-      if (this.bubble) this.bubble.classList.remove('live');
+      if (this.bubble) {
+        this.bubble.classList.remove('live');
+        // 這句結束了 → 送去字幕潤飾（照念原文被丟掉的句子 bubble 已經是 null，不會送）
+        if (!this.echoTurn && this.inText.trim() && this.outText.trim()) {
+          const src = this.role === 'toOther' ? S.langMe : S.langOther;
+          polishBubble(this.bubble, this.inText.trim(), src, this.target);
+        }
+      }
       this.bubble = null; this.inText = ''; this.outText = '';
       this.turnId++; this.echoTurn = false;
     }
