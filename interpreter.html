@@ -642,10 +642,28 @@
     for (const s of S.sessions) s.send(b64);
   }
 
-  async function startMic(){
-    S.stream = await navigator.mediaDevices.getUserMedia({
+  // 開麥克風串流，並監看系統中斷（iOS 切到背景、來電時常發生）
+  async function openMicStream(){
+    const stream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     });
+    const track = stream.getAudioTracks()[0];
+    if (track) {
+      const st = track.getSettings ? track.getSettings() : {};
+      dbg('sys', '[手機] 麥克風：' + (track.label || '（無名稱）') + '，取樣率 ' + (st.sampleRate || '?')
+        + '，回音消除 ' + st.echoCancellation + '，降噪 ' + st.noiseSuppression);
+      track.onended = () => {
+        dbg('err', '[手機] 麥克風被系統中斷（track ended）');
+        if (S.running && document.visibilityState === 'visible') restartMic();
+      };
+      track.onmute = () => dbg('err', '[手機] 麥克風暫停（track muted，例如來電或切到背景）');
+      track.onunmute = () => dbg('sys', '[手機] 麥克風恢復（track unmuted）');
+    }
+    return stream;
+  }
+
+  async function startMic(){
+    S.stream = await openMicStream();
     S.source = S.ctx.createMediaStreamSource(S.stream);
     S.sink = S.ctx.createGain(); S.sink.gain.value = 0; S.sink.connect(S.ctx.destination);
     try {
@@ -653,7 +671,10 @@
       await S.ctx.audioWorklet.addModule(url);
       S.node = new AudioWorkletNode(S.ctx, 'down16k');
       S.node.port.onmessage = e => onChunk(e.data);
+      S.micPath = 'AudioWorklet';
     } catch (err) {
+      dbg('err', '[手機] AudioWorklet 不能用（' + (err && err.message || err) + '），改用 ScriptProcessor 備援');
+      S.micPath = 'ScriptProcessor（備援）';
       // 舊瀏覽器備援：ScriptProcessor
       const ratio = S.ctx.sampleRate / 16000;
       let acc = 0, sum = 0, cnt = 0, out = new Int16Array(1600), n = 0;
@@ -673,6 +694,40 @@
     }
     S.source.connect(S.node);
     S.node.connect(S.sink);
+    dbg('sys', '[手機] 收音方式：' + S.micPath + '；AudioContext ' + S.ctx.sampleRate + 'Hz，狀態 ' + S.ctx.state);
+  }
+
+  // 麥克風被系統斷掉時，只換麥克風串流；處理節點和翻譯連線都不動
+  async function restartMic(){
+    if (S.micRestarting || !S.running || !S.ctx || !S.node) return;
+    S.micRestarting = true;
+    try {
+      try { S.source && S.source.disconnect(); } catch {}
+      if (S.stream) S.stream.getTracks().forEach(t => t.stop());
+      S.stream = await openMicStream();
+      S.source = S.ctx.createMediaStreamSource(S.stream);
+      S.source.connect(S.node);
+      dbg('sys', '[手機] 麥克風已重新開啟');
+      if (S.sessions.every(s => s.ready)) setStatus('聆聽中…請說話', 'on');
+    } catch (err) {
+      // iOS 可能要求使用者操作才能再開麥克風 → 等下一次點畫面
+      setStatus('麥克風被系統關掉了，點一下畫面重新開啟', 'err');
+      dbg('err', '[手機] 麥克風重新開啟失敗：' + (err && err.message || err));
+      document.addEventListener('pointerdown', () => restartMic(), { once: true });
+    } finally {
+      S.micRestarting = false;
+    }
+  }
+
+  // AudioContext 被系統暫停（iOS 切到背景、來電會變成 interrupted / suspended）→ 盡量恢復
+  function resumeAudio(){
+    if (!S.ctx || !S.running || S.ctx.state === 'running' || S.ctx.state === 'closed') return;
+    S.ctx.resume().then(() => {
+      if (S.ctx && S.ctx.state !== 'running') throw new Error(S.ctx.state);
+    }).catch(() => {
+      setStatus('聲音被系統暫停了，點一下畫面恢復', 'err');
+      document.addEventListener('pointerdown', () => resumeAudio(), { once: true });
+    });
   }
 
   // ---------- 開始 / 停止 ----------
@@ -691,6 +746,13 @@
     try {
       S.ctx = new (window.AudioContext || window.webkitAudioContext)();
       await S.ctx.resume();
+      const ctx = S.ctx;
+      ctx.onstatechange = () => {
+        dbg(ctx.state === 'running' ? 'sys' : 'err', '[手機] AudioContext 狀態 → ' + ctx.state);
+        if (ctx === S.ctx && document.visibilityState === 'visible') resumeAudio();
+      };
+      dbg('sys', '[手機] ' + navigator.userAgent);
+      if (navigator.audioSession) dbg('sys', '[手機] audioSession.type = ' + navigator.audioSession.type);
       S.nextPlay = 0; S.playUntil = 0; S.silentRun = 0; S.playOwner = null;
       S.waitLogged = false; S.lastVoice = 0; S.noise = 0;
       await startMic();
@@ -720,13 +782,25 @@
   }
 
   async function requestWakeLock(){
-    try { if ('wakeLock' in navigator) S.wakeLock = await navigator.wakeLock.request('screen'); } catch {}
-  }
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && S.running) {
-      requestWakeLock();
-      if (S.ctx && S.ctx.state !== 'running') S.ctx.resume().catch(() => {});
+    if (!('wakeLock' in navigator)) { dbg('err', '[手機] 這個瀏覽器不支援螢幕常亮（Wake Lock），螢幕可能會自動關掉'); return; }
+    try {
+      S.wakeLock = await navigator.wakeLock.request('screen');
+      dbg('sys', '[手機] 螢幕常亮已啟用');
+      S.wakeLock.addEventListener('release', () => dbg('sys', '[手機] 螢幕常亮被釋放'));
+    } catch (err) {
+      dbg('err', '[手機] 螢幕常亮啟用失敗：' + (err && err.message || err));
     }
+  }
+  // 切到背景再回來：重新要求螢幕常亮、恢復聲音、麥克風斷了就重開
+  document.addEventListener('visibilitychange', () => {
+    if (!S.running) return;
+    if (document.visibilityState === 'hidden') { S.hiddenAt = performance.now(); dbg('sys', '[手機] 切到背景'); return; }
+    const track = S.stream && S.stream.getAudioTracks()[0];
+    dbg('sys', '[手機] 回到前景（離開 ' + Math.round((performance.now() - (S.hiddenAt || performance.now())) / 1000) + ' 秒）；AudioContext '
+      + (S.ctx && S.ctx.state) + '，麥克風 ' + (track ? track.readyState + (track.muted ? '／muted' : '') : '無'));
+    requestWakeLock();
+    resumeAudio();
+    if (!track || track.readyState === 'ended') restartMic();
   });
 
   el.main.onclick = () => (S.running ? stop() : start());
