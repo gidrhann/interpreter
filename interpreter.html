@@ -196,7 +196,7 @@
   // ---------- 狀態 ----------
   const S = {
     running:false, sessions:[], ctx:null, stream:null, source:null, node:null, sink:null,
-    nextPlay:0, playUntil:0, wakeLock:null
+    nextPlay:0, playUntil:0, silentRun:0, playOwner:null, wakeLock:null
   };
 
   // ---------- 工具 ----------
@@ -216,29 +216,50 @@
   }
 
   // ---------- 播放翻譯語音（24kHz PCM16） ----------
-  // 實測：講完第一句後，伺服器會一直送音訊包，安靜時內容是靜音（peak < 0.005），人聲包 peak > 0.05。
-  // 靜音包如果也排進播放，「播放中」會永遠延長，麥克風就一直被換成靜音。所以靜音包直接丟掉。
+  // 實測：每包固定 250ms；開頭會一次先送 2～3 包（約 500ms 的提前量），之後約每 250ms 一包。
+  // 講完第一句後，伺服器會一直送音訊包，安靜時內容是靜音（peak < 0.005），人聲包 peak > 0.05。
+  // - 句子中間的靜音包要照排，不然每丟一包就吃掉 250ms 提前量，之後只要晚到就斷斷續續、有爆音。
+  // - 但連續靜音超過 MAX_SILENT_RUN 包就停止排入，否則播放永遠不會結束、麥克風一直被換成靜音。
+  // - 從閒置開始播放時先延後 START_DELAY 秒，當作網路抖動的緩衝。
   const SILENT_PEAK = 0.02 * 32768;
+  const MAX_SILENT_RUN = 3;       // 最多 750ms 的句中停頓
+  const START_DELAY = 0.3;
   function isAudible(pcm){
     for (let i = 0; i < pcm.length; i++) if (pcm[i] > SILENT_PEAK || pcm[i] < -SILENT_PEAK) return true;
     return false;
   }
-  // 回傳 true 代表這包是有聲音的翻譯語音
-  function playPcm(b64){
+  // owner：送來這包的連線。回傳 true 代表這包是有聲音的翻譯語音
+  function playPcm(b64, owner){
     const pcm = base64ToInt16(b64);
-    if (!pcm.length || !isAudible(pcm)) return false;
-    if (!el.speak.checked || !S.ctx) return true;
+    if (!pcm.length) return false;
+    const audible = isAudible(pcm);
+    if (!el.speak.checked || !S.ctx) return audible;
+    const now = S.ctx.currentTime;
+    const idle = S.nextPlay <= now;
+    if (!audible) {
+      // 只有「正在播放的那條連線」的句中靜音才排入，另一條連線的靜音不能插進來
+      if (idle || owner !== S.playOwner || S.silentRun >= MAX_SILENT_RUN) return false;
+      S.silentRun++;
+    } else {
+      // 句子還沒結束（不是因為句尾靜音而停）卻已經播完 → 網路晚到造成斷音
+      if (idle && S.nextPlay > 0 && now - S.nextPlay < 1 && S.silentRun < MAX_SILENT_RUN) {
+        dbg('err', '[播放] 緩衝用完，語音晚到 ' + Math.round((now - S.nextPlay) * 1000) + 'ms（會聽到斷音）');
+      }
+      if (!idle && owner !== S.playOwner) dbg('sys', '[播放] 另一條連線也有語音，排在後面播');
+      S.silentRun = 0;
+      S.playOwner = owner;
+    }
     const buf = S.ctx.createBuffer(1, pcm.length, 24000);
     const ch = buf.getChannelData(0);
     for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
     const src = S.ctx.createBufferSource();
     src.buffer = buf;
     src.connect(S.ctx.destination);
-    const t = Math.max(S.ctx.currentTime + 0.04, S.nextPlay);
+    const t = idle ? now + START_DELAY : S.nextPlay;
     src.start(t);
     S.nextPlay = t + buf.duration;
-    S.playUntil = S.nextPlay;
-    return true;
+    if (audible) S.playUntil = S.nextPlay;   // 只有真的有聲音才延長「播放中」（決定麥克風要不要換成靜音）
+    return audible;
   }
 
   // 語言代碼取主要部分來比較：zh-Hant / zh-Hans / zh 都算 zh
@@ -371,7 +392,7 @@
       if (c.modelTurn && c.modelTurn.parts) {
         let audible = false;
         for (const p of c.modelTurn.parts) {
-          if (p.inlineData && p.inlineData.data && playPcm(p.inlineData.data)) audible = true;
+          if (p.inlineData && p.inlineData.data && playPcm(p.inlineData.data, this)) audible = true;
         }
         if (audible) {
           if (el.speak.checked) setStatus('播放翻譯中…', 'speak');
@@ -489,7 +510,7 @@
     try {
       S.ctx = new (window.AudioContext || window.webkitAudioContext)();
       await S.ctx.resume();
-      S.nextPlay = 0; S.playUntil = 0;
+      S.nextPlay = 0; S.playUntil = 0; S.silentRun = 0; S.playOwner = null;
       await startMic();
     } catch (err) {
       setStatus('無法開啟麥克風：' + (err && err.message || err), 'err');
