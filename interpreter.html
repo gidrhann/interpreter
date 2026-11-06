@@ -291,7 +291,7 @@
     if (!el.speak.checked || !S.ctx) return audible;
     // 靜音包只有在這條連線正在播、或已經有暫存時才收（保住句中停頓的時間軸）
     if (audible || owner.q.length || owner === S.playOwner) {
-      owner.q.push({ pcm, audible, at: performance.now() });
+      owner.q.push({ pcm, audible, at: performance.now(), turn: owner.turnId });
       if (owner.q.length > QUEUE_MAX) owner.q.shift();
     }
     pump();
@@ -327,11 +327,11 @@
   }
   function drain(o, startDelay){
     const items = o.q; o.q = [];
-    for (const it of items) schedule(it.pcm, it.audible, o, startDelay);
+    for (const it of items) schedule(it.pcm, it.audible, o, startDelay, it.turn);
   }
 
   // 把一包語音排進播放時間軸（處理句中靜音和緩衝）
-  function schedule(pcm, audible, owner, startDelay){
+  function schedule(pcm, audible, owner, startDelay, turn){
     const now = S.ctx.currentTime;
     const idle = S.nextPlay <= now;
     if (!audible) {
@@ -354,6 +354,10 @@
     src.connect(S.ctx.destination);
     const t = idle ? now + startDelay : S.nextPlay;
     src.start(t);
+    // 記下來：之後如果發現這句其實是照念原文，還能把已經排定的語音停掉
+    const rec = { src, turn };
+    owner.srcs.push(rec);
+    src.onended = () => { const i = owner.srcs.indexOf(rec); if (i >= 0) owner.srcs.splice(i, 1); };
     S.nextPlay = t + buf.duration;
     if (audible) S.playUntil = S.nextPlay;   // 只有真的有聲音才延長「播放中」（決定麥克風要不要換成靜音）
   }
@@ -361,6 +365,51 @@
   // 語言代碼取主要部分來比較：zh-Hant / zh-Hans / zh 都算 zh
   const LANG_ALIAS = { tl:'fil', in:'id', iw:'he', nb:'no', nn:'no' };
   const baseLang = c => { const b = String(c || '').toLowerCase().split(/[-_]/)[0]; return LANG_ALIAS[b] || b; };
+
+  // ---------- 判斷輸入是哪一種語言 ----------
+  // iPhone 實測（2026-11-06）：同一句英文，翻成繁中的連線回報 languageCode "en"（對），
+  // 翻成英文的連線卻回報 "zh"（錯），結果英文連線把英文原句又念一次。所以不能只信 languageCode。
+  // 做法：兩邊語言的書寫系統不同時（中文漢字 vs 英文拉丁字母…），直接看原文逐字稿的文字判斷。
+  const SCRIPTS = [
+    ['Kana', /[\p{Script=Hiragana}\p{Script=Katakana}]/u], ['Han', /\p{Script=Han}/u], ['Hangul', /\p{Script=Hangul}/u],
+    ['Thai', /\p{Script=Thai}/u], ['Cyrillic', /\p{Script=Cyrillic}/u], ['Arabic', /\p{Script=Arabic}/u],
+    ['Devanagari', /\p{Script=Devanagari}/u], ['Myanmar', /\p{Script=Myanmar}/u], ['Khmer', /\p{Script=Khmer}/u],
+    ['Latin', /\p{Script=Latin}/u]
+  ];
+  const LANG_SCRIPT = { zh:'Han', ja:'Kana', ko:'Hangul', th:'Thai', ru:'Cyrillic', uk:'Cyrillic', ar:'Arabic', fa:'Arabic',
+    ur:'Arabic', hi:'Devanagari', mr:'Devanagari', ne:'Devanagari', my:'Myanmar', km:'Khmer' };
+  const langScript = code => LANG_SCRIPT[baseLang(code)] || 'Latin';
+  function dominantScript(text){
+    const n = {}; let total = 0;
+    for (const ch of text) {
+      for (const [name, re] of SCRIPTS) if (re.test(ch)) { n[name] = (n[name] || 0) + 1; total++; break; }
+    }
+    if (total < 2) return '';
+    if (n.Kana) return 'Kana';                         // 有假名就是日文（日文也有漢字）
+    return Object.keys(n).sort((a, b) => n[b] - n[a])[0];
+  }
+  // 回傳判斷出的語言代碼；回傳 null 代表這段文字判斷不出來（維持原判斷）。
+  // 兩邊書寫系統相同（例如英文 ↔ 印尼文）時才用伺服器給的 languageCode。
+  function detectInputLang(text, serverCode){
+    const me = S.langMe, other = S.langOther;
+    const sMe = langScript(me), sOther = langScript(other);
+    if (sMe === sOther) return serverCode || null;
+    let d = dominantScript(text);
+    if (d === 'Han' && (sMe === 'Kana' || sOther === 'Kana') && sMe !== 'Han' && sOther !== 'Han') d = 'Kana';
+    if (d === sMe) return me;
+    if (d === sOther) return other;
+    return null;   // 太短（例如只有 " I"）或是第三種文字：不要被伺服器可能錯的代碼拉走
+  }
+  // 譯文和原文幾乎一樣 → 是照念原文，不是翻譯（給兩邊都是拉丁字母的語言組合當備援）
+  const textTokens = s => String(s).toLowerCase().match(/\p{Script=Han}|[\p{L}\p{N}]+/gu) || [];
+  function looksLikeEcho(input, output){
+    const out = textTokens(output);
+    if (out.length < 3) return false;
+    const inSet = new Set(textTokens(input));
+    let hit = 0;
+    for (const t of out) if (inSet.has(t)) hit++;
+    return hit / out.length >= 0.6;
+  }
   const isPlaying = () => S.ctx && S.ctx.currentTime < S.playUntil + 0.3;
 
   // ---------- 對話泡泡 ----------
@@ -430,6 +479,9 @@
       this.inText = ''; this.outText = ''; this.bubble = null; this.idle = null;
       this.inLang = '';          // 最近一次 inputTranscription 的 languageCode
       this.lastInAt = 0;         // 最近一次收到原文逐字稿的時間
+      this.turnId = 0;           // 第幾句（語音和泡泡都標上，方便整句丟掉）
+      this.echoTurn = false;     // 這一句被判定為照念原文
+      this.srcs = [];            // 已排進播放的語音（可以停掉）
       this.q = [];               // 這條連線還沒排進播放的語音
       this.open(false);
     }
@@ -537,12 +589,19 @@
       if (!c) return;
       const it = c.inputTranscription;
       if (it && it.text && it.text.trim()) {
-        // 實測：每句的 inputTranscription（帶 languageCode）比翻譯語音早約 250ms 到，可以拿來判斷要不要翻
-        if (it.languageCode && it.languageCode !== this.inLang) {
-          this.inLang = it.languageCode;
+        // 實測：每句的 inputTranscription 比翻譯語音早約 250ms 到，可以拿來判斷要不要翻
+        const lang = detectInputLang(it.text, it.languageCode);
+        if (lang && it.languageCode && baseLang(lang) !== baseLang(it.languageCode)) {
+          dbg('sys', this.tag + ' 伺服器說原文是 ' + it.languageCode + '，但文字看起來是 ' + lang + '，以文字為準');
+        }
+        if (lang && baseLang(lang) !== baseLang(this.inLang)) {
+          const wasEcho = this.isEcho();
+          this.inLang = lang;
           if (this.isEcho()) {
-            dbg('sys', this.tag + ' 輸入語言是 ' + this.inLang + '，和目標相同，這條連線略過輸出');
+            dbg('sys', this.tag + ' 輸入語言是 ' + lang + '，和目標相同，這條連線略過輸出');
             this.resetTurn();
+          } else if (wasEcho) {
+            this.resetTurn();                  // 換回需要翻的語言 → 新的一句
           }
         }
         if (!this.isEcho()) {
@@ -564,6 +623,12 @@
         this.bubble.querySelector('.trans').textContent = this.outText.trim();
         this.touch();
         scrollDown();
+        // 備援：譯文和原文幾乎一樣 → 是照念原文。整句丟掉（泡泡、暫存和已排定的語音）
+        if (looksLikeEcho(this.inText, this.outText)) {
+          dbg('sys', this.tag + ' 譯文和原文幾乎一樣，判定為照念原文，這句丟掉：' + this.outText.trim().slice(0, 60));
+          this.dropTurn();
+          return;
+        }
       }
       if (c.modelTurn && c.modelTurn.parts) {
         let audible = false;
@@ -577,8 +642,18 @@
       }
       if (c.turnComplete) this.touch(600);
     }
-    // 輸入已經是這條連線的目標語言（例如我說中文，而這條是翻成中文的）→ 不該輸出
-    isEcho(){ return !!this.inLang && baseLang(this.inLang) === baseLang(this.target); }
+    // 輸入已經是這條連線的目標語言（例如我說中文，而這條是翻成中文的），或這句被判定為照念原文 → 不該輸出
+    isEcho(){ return this.echoTurn || (!!this.inLang && baseLang(this.inLang) === baseLang(this.target)); }
+    // 這一句是照念原文：拿掉泡泡、丟掉還沒播的語音、停掉已排定的語音
+    dropTurn(){
+      const turn = this.turnId;
+      if (this.bubble) { this.bubble.remove(); this.bubble = null; }
+      this.q = this.q.filter(it => it.turn !== turn);
+      let stopped = 0;
+      for (const r of this.srcs.slice()) if (r.turn === turn) { try { r.src.stop(); stopped++; } catch {} }
+      if (stopped && S.playOwner === this && S.ctx) { S.nextPlay = S.ctx.currentTime; S.playUntil = S.ctx.currentTime; }
+      this.echoTurn = true;
+    }
     // 一段時間沒有新內容，就把這則泡泡收尾
     touch(ms = 1800){
       clearTimeout(this.idle);
@@ -592,6 +667,7 @@
     resetTurn(){
       if (this.bubble) this.bubble.classList.remove('live');
       this.bubble = null; this.inText = ''; this.outText = '';
+      this.turnId++; this.echoTurn = false;
     }
     send(b64){
       if (this.ready && this.ws && this.ws.readyState === 1) {
@@ -744,6 +820,7 @@
     el.main.textContent = '停止'; el.main.classList.add('stop');
     setStatus('啟動中…');
     try {
+      S.langMe = el.langMe.value; S.langOther = el.langOther.value;   // 這次口譯期間固定，判斷語言用
       S.ctx = new (window.AudioContext || window.webkitAudioContext)();
       await S.ctx.resume();
       const ctx = S.ctx;

@@ -26,6 +26,7 @@
 - `inputTranscription.languageCode` 是主要語言代碼，例如中文是 `zh`，不是 `zh-Hant`；`outputTranscription.languageCode` 是目標語言代碼。比對時取主要部分（`baseLang()`）。
 - 每句的 `inputTranscription` 比對應的翻譯語音早約 250ms 到，所以可以用它來決定要不要輸出。
 - **`echoTargetLanguage: false` 不可靠**：輸入已經是目標語言時，有時仍會把原句（文字和語音）照念一次。app 用「輸入語言＝目標語言就略過」自己過濾（`Session.isEcho()`）。
+- **`inputTranscription.languageCode` 在真人語音下也不可靠**（iPhone 實測）：同一句英文，繁中連線回報 `en`，英文連線卻回報 `zh`，結果英文連線照念英文原句。合成語音（SAPI）重現不出來。對策：兩邊語言書寫系統不同時，**看原文逐字稿的文字判斷語言**（`detectInputLang()`，漢字／拉丁字母／假名／韓文…），文字太短判斷不出來就維持原判斷，不退回伺服器代碼；書寫系統相同時才用 languageCode。備援：譯文 token 有 60% 以上出現在原文裡 → 判定照念，整句丟掉（`looksLikeEcho()`、`Session.dropTurn()`）。
 - 第一句話之後，伺服器會**持續送音訊包，安靜時內容是靜音**（peak < 0.005，人聲包 peak > 0.05）。靜音包不可以延長「播放中」或泡泡計時，否則麥克風會一直被換成靜音。
 - 音訊每包固定 250ms，開頭一次先送 2～3 包，之後約每 250ms 一包（即時速度）。**句中的靜音包不能丟**，否則每丟一包就少 250ms 提前量，手機上會斷斷續續、有爆音（已在手機實測遇到）。做法：句中靜音最多照排 3 包，從閒置開始播放時延後 300ms 當緩衝。
 - 連續串流時不會收到 `turnComplete`，泡泡收尾靠閒置計時。
