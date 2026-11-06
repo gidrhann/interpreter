@@ -52,14 +52,14 @@ class Conn {
     this.inLang = new Set(); this.outLang = new Set(); this.audioBytes = 0; this.turns = 0;
     this.setupOk = false; this.close = null; this.other = {}; this.pcm = [];
     // 模擬 interpreter.html 的判斷：輸入語言＝目標語言就略過；靜音包不算
-    this.appLang = ''; this.appText = ''; this.appAudioSec = 0;
+    this.appLang = ''; this.appText = ''; this.appAudioSec = 0; this.events = [];
   }
   open() {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`${WS_BASE}?key=${encodeURIComponent(KEY)}`);
       ws.binaryType = 'arraybuffer';
       this.ws = ws;
-      const t0 = Date.now();
+      const t0 = Conn.t0 ||= Date.now();
       // 和 interpreter.html 相同：transcription 在 setup 頂層，translationConfig 在 generationConfig 裡
       ws.onopen = () => ws.send(JSON.stringify({ setup: { model: 'models/' + MODEL,
         generationConfig: { responseModalities: ['AUDIO'],
@@ -74,6 +74,13 @@ class Conn {
         if (m.setupComplete) { this.setupOk = true; resolve(); }
         const c = m.serverContent; if (!c) return;
         for (const k of Object.keys(c)) if (!['modelTurn', 'inputTranscription', 'outputTranscription', 'turnComplete'].includes(k)) this.other['serverContent.' + k] = (this.other['serverContent.' + k] || 0) + 1;
+        if (c.inputTranscription?.text?.trim()) this.events.push({ t: ms, k: 'IN', lang: c.inputTranscription.languageCode, text: c.inputTranscription.text });
+        if (c.outputTranscription?.text?.trim()) this.events.push({ t: ms, k: 'OUT', text: c.outputTranscription.text });
+        for (const p of c.modelTurn?.parts || []) if (p.inlineData?.data) {
+          const b = Buffer.from(p.inlineData.data, 'base64'); let pk = 0;
+          for (let i = 0; i + 1 < b.length; i += 2) pk = Math.max(pk, Math.abs(b.readInt16LE(i)));
+          this.events.push({ t: ms, k: 'AUD', loud: pk > 655 });
+        }
         const it = c.inputTranscription;
         if (it && it.text && it.text.trim() && it.languageCode) this.appLang = it.languageCode;
         const echo = !!this.appLang && baseLang(this.appLang) === baseLang(this.target);
@@ -119,6 +126,7 @@ const results = [];
 for (const f of files) {
   const pcm = readWav(await readFile(f));
   console.log(`\n=== ${basename(f)}：${(pcm.length / 32000).toFixed(1)} 秒，目標 ${TARGETS.join(' / ')} ===`);
+  Conn.t0 = 0;
   const conns = TARGETS.map(t => new Conn(t));
   await Promise.all(conns.map(c => c.open()));
   console.log('  兩條連線都收到 setupComplete，開始送音訊');
@@ -141,6 +149,10 @@ for (const f of files) {
     h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(24000, 24);
     h.writeUInt32LE(48000, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(d.length, 40);
     await writeFile(join(outDir0, basename(f, '.wav') + '-to-' + c.target + '.wav'), Buffer.concat([h, d]));
+  }
+  if (opt.events) {
+    const all = conns.flatMap(c => c.events.map(e => ({ ...e, who: c.target }))).sort((a, b) => a.t - b.t);
+    await writeFile(join(outDir0, basename(f, '.wav') + '-events.json'), JSON.stringify(all, null, 0));
   }
   const r = { 檔案: basename(f), 連線: conns.map(c => c.report()) };
   console.log(JSON.stringify(r, null, 2));

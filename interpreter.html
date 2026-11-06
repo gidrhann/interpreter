@@ -229,7 +229,7 @@
   // ---------- 狀態 ----------
   const S = {
     running:false, sessions:[], ctx:null, stream:null, source:null, node:null, sink:null,
-    nextPlay:0, playUntil:0, silentRun:0, playOwner:null, pending:[], lastVoice:0, noise:0, wakeLock:null
+    nextPlay:0, playUntil:0, silentRun:0, playOwner:null, waitLogged:false, lastVoice:0, noise:0, wakeLock:null
   };
 
   // ---------- 工具 ----------
@@ -277,31 +277,56 @@
   }
   const waitMs = () => Number(el.wait.value) || 0;
   const userSpeaking = () => waitMs() > 0 && performance.now() - S.lastVoice < waitMs();
-  const PENDING_MAX = 240;        // 最多暫存 60 秒，超過就直接播
+  const QUEUE_MAX = 240;          // 每條連線最多暫存 60 秒
 
-  // 說話的人停下來了 → 把暫存的翻譯語音一次排進播放
-  function flushPending(){
-    if (!S.pending.length || (userSpeaking() && S.pending.length < PENDING_MAX)) return;
-    const items = S.pending; S.pending = [];
-    dbg('sys', '[播放] 說話停了，開始播放暫存的 ' + items.length + ' 包（' + (items.length / 4).toFixed(1) + ' 秒）');
-    for (const it of items) schedule(it.pcm, it.audible, it.owner, 0.1);
-  }
-
+  // ---------- 播放排程：每條連線各自一個佇列，同一時間只播一條，絕不交錯 ----------
+  // 實測：換語言時，上一句的翻譯（例如英文連線）和下一句的翻譯（繁中連線）可能同時在送。
+  // 以前共用一個佇列，會變成 250ms 中文、250ms 英文交錯播出，聽起來就是中英夾雜加雜訊。
   // owner：送來這包的連線。回傳 true 代表這包是有聲音的翻譯語音
   function playPcm(b64, owner){
     const pcm = base64ToInt16(b64);
     if (!pcm.length) return false;
     const audible = isAudible(pcm);
     if (!el.speak.checked || !S.ctx) return audible;
-    // 還沒開始播、而且有人還在說話（或前面已經有暫存）→ 先暫存
-    const idle = S.nextPlay <= S.ctx.currentTime;
-    if (S.pending.length || (idle && audible && userSpeaking())) {
-      if (!S.pending.length) dbg('sys', '[播放] 還有人在說話，翻譯語音先暫存');
-      S.pending.push({ pcm, audible, owner });
-      return audible;
+    // 靜音包只有在這條連線正在播、或已經有暫存時才收（保住句中停頓的時間軸）
+    if (audible || owner.q.length || owner === S.playOwner) {
+      owner.q.push({ pcm, audible, at: performance.now() });
+      if (owner.q.length > QUEUE_MAX) owner.q.shift();
     }
-    schedule(pcm, audible, owner, START_DELAY);
+    pump();
     return audible;
+  }
+
+  // 把佇列裡的語音排進播放時間軸。每收到一包語音、以及麥克風每 100ms 都會呼叫一次。
+  function pump(){
+    if (!S.ctx || !el.speak.checked) return;
+    const idle = S.nextPlay <= S.ctx.currentTime;
+    if (!idle) {
+      // 正在播：只接著排同一條連線的語音，其他連線排隊等這段播完
+      const o = S.playOwner;
+      if (o && o.q.length) drain(o, START_DELAY);
+      return;
+    }
+    for (const s of S.sessions) while (s.q.length && !s.q[0].audible) s.q.shift();   // 開頭的靜音不要
+    const ready = S.sessions.filter(s => s.q.length);
+    if (!ready.length) return;
+    if (userSpeaking()) {                   // 還有人在說話 → 先暫存，等說完
+      if (!S.waitLogged) { S.waitLogged = true; dbg('sys', '[播放] 還有人在說話，翻譯語音先暫存'); }
+      return;
+    }
+    S.waitLogged = false;
+    // 目前這條連線優先，否則選最早有語音的那條
+    const o = ready.includes(S.playOwner) ? S.playOwner : ready.sort((a, b) => a.q[0].at - b.q[0].at)[0];
+    if (o !== S.playOwner) S.silentRun = 0;
+    const n = o.q.length;
+    if (n > 2) dbg('sys', '[播放] 開始播放 ' + o.tag + ' 暫存的 ' + n + ' 包（' + (n / 4).toFixed(1) + ' 秒）'
+      + (ready.length > 1 ? '，另一條連線排隊等' : ''));
+    S.playOwner = o;
+    drain(o, n > 2 ? 0.1 : START_DELAY);    // 已經暫存好幾包就不必再加緩衝
+  }
+  function drain(o, startDelay){
+    const items = o.q; o.q = [];
+    for (const it of items) schedule(it.pcm, it.audible, o, startDelay);
   }
 
   // 把一包語音排進播放時間軸（處理句中靜音和緩衝）
@@ -317,7 +342,6 @@
       if (idle && startDelay === START_DELAY && S.nextPlay > 0 && now - S.nextPlay < 1 && S.silentRun < MAX_SILENT_RUN) {
         dbg('err', '[播放] 緩衝用完，語音晚到 ' + Math.round((now - S.nextPlay) * 1000) + 'ms（會聽到斷音）');
       }
-      if (!idle && owner !== S.playOwner) dbg('sys', '[播放] 另一條連線也有語音，排在後面播');
       S.silentRun = 0;
       S.playOwner = owner;
     }
@@ -369,6 +393,7 @@
       this.ws = null; this.ready = false; this.retry = 0;
       this.inText = ''; this.outText = ''; this.bubble = null; this.idle = null;
       this.inLang = '';          // 最近一次 inputTranscription 的 languageCode
+      this.q = [];               // 這條連線還沒排進播放的語音
       this.connect();
     }
     connect(){
@@ -466,7 +491,7 @@
           if (p.inlineData && p.inlineData.data && playPcm(p.inlineData.data, this)) audible = true;
         }
         if (audible) {
-          if (el.speak.checked) setStatus(S.pending.length ? '翻譯好了，等說完再播…' : '播放翻譯中…', 'speak');
+          if (el.speak.checked) setStatus(this.q.length && !isPlaying() ? '翻譯好了，等說完再播…' : '播放翻譯中…', 'speak');
           this.touch();
         }
       }
@@ -479,7 +504,7 @@
       clearTimeout(this.idle);
       this.idle = setTimeout(() => {
         // 還有人在說話、翻譯語音還在暫存或還在播 → 這句還沒完，泡泡先別收尾
-        if (S.running && (S.pending.length || isPlaying() || performance.now() - S.lastVoice < 1500)) { this.touch(ms); return; }
+        if (S.running && (this.q.length || isPlaying() || performance.now() - S.lastVoice < 1500)) { this.touch(ms); return; }
         this.resetTurn();
         if (S.running && S.sessions.every(s => s.ready)) setStatus('聆聽中…請說話', 'on');
       }, ms);
@@ -498,6 +523,7 @@
     close(){
       clearTimeout(this.idle);
       this.resetTurn();
+      this.q = [];
       const ws = this.ws; this.ws = null;
       try { ws && ws.close(); } catch {}
     }
@@ -529,7 +555,7 @@
   function onChunk(int16){
     if (!S.running) return;
     trackVoice(int16);          // 用真正的麥克風音量判斷有沒有人在說話（要在換成靜音之前）
-    flushPending();
+    pump();
     // 播放翻譯語音時送靜音，避免喇叭聲被收進去又翻一次
     if (el.speak.checked && isPlaying()) int16 = new Int16Array(int16.length);
     const b64 = int16ToBase64(int16);
@@ -586,7 +612,7 @@
       S.ctx = new (window.AudioContext || window.webkitAudioContext)();
       await S.ctx.resume();
       S.nextPlay = 0; S.playUntil = 0; S.silentRun = 0; S.playOwner = null;
-      S.pending = []; S.lastVoice = 0; S.noise = 0;
+      S.waitLogged = false; S.lastVoice = 0; S.noise = 0;
       await startMic();
     } catch (err) {
       setStatus('無法開啟麥克風：' + (err && err.message || err), 'err');
@@ -608,7 +634,6 @@
     if (S.stream) S.stream.getTracks().forEach(t => t.stop());
     if (S.ctx) { S.ctx.close().catch(() => {}); }
     S.ctx = S.stream = S.source = S.node = S.sink = null;
-    S.pending = [];
     if (S.wakeLock) { S.wakeLock.release().catch(() => {}); S.wakeLock = null; }
     el.main.textContent = '開始口譯'; el.main.classList.remove('stop');
     if (!keepStatus) setStatus('已停止');
