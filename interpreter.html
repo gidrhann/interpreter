@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>即時口譯</title>
+<style>
+  :root{
+    --bg:#0f172a; --panel:#1e293b; --line:#334155; --text:#e2e8f0; --muted:#94a3b8;
+    --me:#0e7490; --them:#334155; --accent:#22d3ee; --danger:#ef4444; --ok:#22c55e;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif}
+  body{display:flex;flex-direction:column;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+  header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--line)}
+  header h1{font-size:18px;margin:0}
+  .iconbtn{background:none;border:1px solid var(--line);color:var(--text);border-radius:10px;padding:6px 12px;font-size:15px}
+  #settings{background:var(--panel);padding:14px 16px;border-bottom:1px solid var(--line);display:none}
+  #settings.open{display:block}
+  label{display:block;font-size:13px;color:var(--muted);margin:10px 0 4px}
+  input,select{width:100%;font-size:16px;padding:10px;border-radius:10px;border:1px solid var(--line);
+    background:var(--bg);color:var(--text)}
+  .row{display:flex;gap:10px}.row>div{flex:1}
+  .check{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:15px;color:var(--text)}
+  .check input{width:auto}
+  .note{font-size:12px;color:var(--muted);line-height:1.5;margin-top:10px}
+  .note a{color:var(--accent)}
+  #log{flex:1;overflow-y:auto;padding:14px 12px;display:flex;flex-direction:column;gap:10px}
+  .empty{color:var(--muted);text-align:center;margin-top:30%;line-height:1.8;font-size:15px}
+  .msg{max-width:88%;padding:10px 12px;border-radius:14px;cursor:pointer}
+  .msg.me{align-self:flex-end;background:var(--me)}
+  .msg.them{align-self:flex-start;background:var(--them)}
+  .msg .who{font-size:11px;opacity:.7;margin-bottom:2px}
+  .msg .orig{font-size:13px;opacity:.75;margin-bottom:4px}
+  .msg .trans{font-size:19px;line-height:1.45}
+  .msg.live .trans::after{content:" ▍";opacity:.6}
+  footer{padding:12px 16px 16px;border-top:1px solid var(--line)}
+  #status{font-size:13px;color:var(--muted);margin-bottom:10px;min-height:18px;display:flex;align-items:center;gap:8px}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--muted);flex:none}
+  .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  .dot.err{background:var(--danger)}
+  .dot.speak{background:var(--accent);box-shadow:0 0 8px var(--accent)}
+  #main{width:100%;font-size:20px;font-weight:600;padding:16px;border:none;border-radius:16px;
+    background:var(--accent);color:#082f49}
+  #main.stop{background:var(--danger);color:#fff}
+  .tools{display:flex;gap:10px;margin-top:10px}
+  .tools button{flex:1}
+  #overlay{position:fixed;inset:0;background:#fff;color:#000;display:none;align-items:center;justify-content:center;
+    padding:24px;font-size:34px;line-height:1.5;text-align:center;z-index:10}
+  #overlay.open{display:flex}
+  #overlay small{position:absolute;bottom:24px;left:0;right:0;font-size:14px;color:#666}
+  /* 除錯模式（網址加 #debug） */
+  #debug{display:none;border-top:1px solid var(--line);background:#020617}
+  #debug.open{display:block}
+  #debug .bar{display:flex;gap:8px;align-items:center;padding:6px 10px;font-size:12px;color:var(--muted)}
+  #debug .bar span{flex:1}
+  #debug .bar button{padding:3px 10px;font-size:12px}
+  #debugLog{margin:0;padding:6px 10px;max-height:32vh;overflow:auto;font:11px/1.45 ui-monospace,Menlo,Consolas,monospace;
+    white-space:pre-wrap;word-break:break-all;color:#cbd5e1}
+  #debugLog .in{color:#a5f3fc}#debugLog .out{color:#fde68a}#debugLog .err{color:#fca5a5}
+</style>
+</head>
+<body>
+<header>
+  <h1>🎧 即時口譯</h1>
+  <button class="iconbtn" id="toggleSettings">⚙️ 設定</button>
+</header>
+
+<section id="settings">
+  <label for="apiKey">Gemini API Key（只存在這支手機）</label>
+  <input id="apiKey" type="password" autocomplete="off" placeholder="貼上 AI Studio 的 API key">
+  <div class="row">
+    <div>
+      <label for="langMe">我的語言</label>
+      <select id="langMe"></select>
+    </div>
+    <div>
+      <label for="langOther">對方語言</label>
+      <select id="langOther"></select>
+    </div>
+  </div>
+  <label for="mode">翻譯方向</label>
+  <select id="mode">
+    <option value="both">雙向自動（偵測誰在說話）</option>
+    <option value="toOther">只翻成對方語言</option>
+    <option value="toMe">只翻成我的語言</option>
+  </select>
+  <label class="check"><input type="checkbox" id="speak" checked> 播放翻譯語音（關掉就只看字幕）</label>
+  <label for="model">模型名稱（進階，通常不用改）</label>
+  <input id="model" type="text" autocomplete="off">
+  <p class="note">
+    API key 在 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a> 免費申請。
+    依 Google 條款，免費方案的內容可能會被用來改善 Google 的產品，所以請不要用來翻譯可辨識病人身分的資訊。<br>
+    播放語音時會暫停收音，避免翻譯聲又被麥克風收進去。
+  </p>
+</section>
+
+<main id="log"><div class="empty" id="empty">按下「開始口譯」，對著手機說話<br>點一下翻譯泡泡可以放大給對方看</div></main>
+
+<section id="debug">
+  <div class="bar"><span>除錯紀錄（← 收到、→ 送出、✕ 錯誤 / 關閉）</span>
+    <button class="iconbtn" id="debugCopy">複製</button><button class="iconbtn" id="debugClear">清除</button></div>
+  <pre id="debugLog"></pre>
+</section>
+
+<footer>
+  <div id="status"><span class="dot" id="dot"></span><span id="statusText">尚未開始</span></div>
+  <button id="main">開始口譯</button>
+  <div class="tools">
+    <button class="iconbtn" id="clear">清除紀錄</button>
+  </div>
+</footer>
+
+<div id="overlay"><div id="overlayText"></div><small>點一下關閉</small></div>
+
+<script>
+(() => {
+  'use strict';
+
+  const DEFAULT_MODEL = 'gemini-3.5-live-translate-preview';
+  const WS_BASE = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
+  const LANGS = [
+    ['zh-Hant','繁體中文'],['en','英文'],['ja','日文'],['ko','韓文'],['vi','越南文'],
+    ['id','印尼文'],['th','泰文'],['fil','菲律賓文'],['ms','馬來文'],['my','緬甸文'],
+    ['km','高棉文'],['hi','印地文'],['es','西班牙文'],['fr','法文'],['de','德文'],
+    ['ru','俄文'],['ar','阿拉伯文'],['pt-BR','葡萄牙文（巴西）'],['zh-Hans','簡體中文']
+  ];
+  const langName = c => (LANGS.find(l => l[0] === c) || [c, c])[1];
+
+  const $ = id => document.getElementById(id);
+  const el = {
+    settings:$('settings'), apiKey:$('apiKey'), langMe:$('langMe'), langOther:$('langOther'),
+    mode:$('mode'), speak:$('speak'), model:$('model'), log:$('log'), empty:$('empty'),
+    dot:$('dot'), statusText:$('statusText'), main:$('main'), overlay:$('overlay'), overlayText:$('overlayText')
+  };
+
+  // ---------- 設定（存在本機） ----------
+  const store = {
+    get(k, d){ try { const v = localStorage.getItem('interp.' + k); return v === null ? d : v; } catch { return d; } },
+    set(k, v){ try { localStorage.setItem('interp.' + k, v); } catch {} }
+  };
+  for (const sel of [el.langMe, el.langOther]) {
+    for (const [code, name] of LANGS) sel.add(new Option(name, code));
+  }
+  el.apiKey.value = store.get('key', '');
+  el.langMe.value = store.get('me', 'zh-Hant');
+  el.langOther.value = store.get('other', 'en');
+  el.mode.value = store.get('mode', 'both');
+  el.speak.checked = store.get('speak', '1') === '1';
+  el.model.value = store.get('model', DEFAULT_MODEL);
+  el.apiKey.onchange = () => store.set('key', el.apiKey.value.trim());
+  el.langMe.onchange = () => store.set('me', el.langMe.value);
+  el.langOther.onchange = () => store.set('other', el.langOther.value);
+  el.mode.onchange = () => store.set('mode', el.mode.value);
+  el.speak.onchange = () => store.set('speak', el.speak.checked ? '1' : '0');
+  el.model.onchange = () => store.set('model', el.model.value.trim() || DEFAULT_MODEL);
+  if (!el.apiKey.value) el.settings.classList.add('open');
+  $('toggleSettings').onclick = () => el.settings.classList.toggle('open');
+
+  function setStatus(text, kind){
+    el.statusText.textContent = text;
+    el.dot.className = 'dot' + (kind ? ' ' + kind : '');
+    dbg('sys', '[狀態] ' + text);
+  }
+
+  // ---------- 除錯模式：網址帶 #debug 時顯示原始 server 訊息 ----------
+  const debugBox = $('debug'), debugLog = $('debugLog');
+  const DEBUG_MAX = 400;          // 最多保留幾行，避免長時間使用拖慢手機
+  const isDebug = () => /(^|[#&])debug\b/.test(location.hash.slice(1));
+  const syncDebug = () => debugBox.classList.toggle('open', isDebug());
+  window.addEventListener('hashchange', syncDebug);
+  syncDebug();
+  // 把音訊 base64 換成長度摘要，畫面才看得懂
+  const shrink = (k, v) => (typeof v === 'string' && v.length > 200 && /data$/i.test(k)) ? `<base64 ${v.length} 字元>` : v;
+  function dbg(kind, tag, obj){
+    if (!isDebug()) return;
+    const t = new Date();
+    const ts = t.toTimeString().slice(0, 8) + '.' + String(t.getMilliseconds()).padStart(3, '0');
+    const line = document.createElement('div');
+    line.className = kind;
+    line.textContent = ts + ' ' + tag + (obj === undefined ? '' : ' ' + (typeof obj === 'string' ? obj : JSON.stringify(obj, shrink)));
+    const atBottom = debugLog.scrollTop + debugLog.clientHeight >= debugLog.scrollHeight - 20;
+    debugLog.appendChild(line);
+    while (debugLog.childNodes.length > DEBUG_MAX) debugLog.firstChild.remove();
+    if (atBottom) debugLog.scrollTop = debugLog.scrollHeight;
+  }
+  $('debugClear').onclick = () => { debugLog.textContent = ''; };
+  $('debugCopy').onclick = async () => {
+    try { await navigator.clipboard.writeText(debugLog.innerText); dbg('sys', '[已複製到剪貼簿]'); }
+    catch (e) { dbg('err', '[複製失敗] ' + (e && e.message || e)); }
+  };
+
+  // ---------- 狀態 ----------
+  const S = {
+    running:false, sessions:[], ctx:null, stream:null, source:null, node:null, sink:null,
+    nextPlay:0, playUntil:0, wakeLock:null
+  };
+
+  // ---------- 工具 ----------
+  function int16ToBase64(int16){
+    const bytes = new Uint8Array(int16.buffer, int16.byteOffset, int16.byteLength);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+  function base64ToInt16(b64){
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Int16Array(bytes.buffer, 0, bytes.length >> 1);
+  }
+
+  // ---------- 播放翻譯語音（24kHz PCM16） ----------
+  // 實測：講完第一句後，伺服器會一直送音訊包，安靜時內容是靜音（peak < 0.005），人聲包 peak > 0.05。
+  // 靜音包如果也排進播放，「播放中」會永遠延長，麥克風就一直被換成靜音。所以靜音包直接丟掉。
+  const SILENT_PEAK = 0.02 * 32768;
+  function isAudible(pcm){
+    for (let i = 0; i < pcm.length; i++) if (pcm[i] > SILENT_PEAK || pcm[i] < -SILENT_PEAK) return true;
+    return false;
+  }
+  // 回傳 true 代表這包是有聲音的翻譯語音
+  function playPcm(b64){
+    const pcm = base64ToInt16(b64);
+    if (!pcm.length || !isAudible(pcm)) return false;
+    if (!el.speak.checked || !S.ctx) return true;
+    const buf = S.ctx.createBuffer(1, pcm.length, 24000);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    const src = S.ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(S.ctx.destination);
+    const t = Math.max(S.ctx.currentTime + 0.04, S.nextPlay);
+    src.start(t);
+    S.nextPlay = t + buf.duration;
+    S.playUntil = S.nextPlay;
+    return true;
+  }
+
+  // 語言代碼取主要部分來比較：zh-Hant / zh-Hans / zh 都算 zh
+  const LANG_ALIAS = { tl:'fil', in:'id', iw:'he', nb:'no', nn:'no' };
+  const baseLang = c => { const b = String(c || '').toLowerCase().split(/[-_]/)[0]; return LANG_ALIAS[b] || b; };
+  const isPlaying = () => S.ctx && S.ctx.currentTime < S.playUntil + 0.3;
+
+  // ---------- 對話泡泡 ----------
+  function newBubble(role){
+    if (el.empty) { el.empty.remove(); el.empty = null; }
+    const div = document.createElement('div');
+    div.className = 'msg live ' + (role === 'toOther' ? 'me' : 'them');
+    div.innerHTML = '<div class="who"></div><div class="orig"></div><div class="trans"></div>';
+    div.querySelector('.who').textContent = role === 'toOther'
+      ? '我 → ' + langName(el.langOther.value)
+      : '對方 → ' + langName(el.langMe.value);
+    div.onclick = () => {
+      el.overlayText.textContent = div.querySelector('.trans').textContent;
+      el.overlay.classList.add('open');
+    };
+    el.log.appendChild(div);
+    return div;
+  }
+  function scrollDown(){ el.log.scrollTop = el.log.scrollHeight; }
+  el.overlay.onclick = () => el.overlay.classList.remove('open');
+  $('clear').onclick = () => {
+    el.log.innerHTML = '';
+    for (const s of S.sessions) s.resetTurn();
+  };
+
+  // ---------- 一條 Live 翻譯連線 ----------
+  class Session {
+    constructor(role, target){
+      this.role = role;          // 'toOther'：我說話；'toMe'：對方說話
+      this.target = target;
+      this.ws = null; this.ready = false; this.retry = 0;
+      this.inText = ''; this.outText = ''; this.bubble = null; this.idle = null;
+      this.inLang = '';          // 最近一次 inputTranscription 的 languageCode
+      this.connect();
+    }
+    connect(){
+      const key = el.apiKey.value.trim();
+      const model = el.model.value.trim() || DEFAULT_MODEL;
+      this.ready = false;
+      const tag = '[→' + this.target + ']';
+      this.tag = tag;
+      dbg('sys', tag + ' 連線中（key 不顯示）', WS_BASE);
+      const ws = new WebSocket(WS_BASE + '?key=' + encodeURIComponent(key));
+      this.ws = ws;
+      ws.onopen = () => {
+        // 實測（2026-11-06）：兩個 *AudioTranscription 必須放在 setup 頂層，
+        // 放進 generationConfig 會被 1007 拒絕；translationConfig 則必須在 generationConfig 裡。
+        const setup = {
+          setup: {
+            model: 'models/' + model,
+            generationConfig: {
+              responseModalities: ['AUDIO'],
+              translationConfig: { targetLanguageCode: this.target, echoTargetLanguage: false }
+            },
+            inputAudioTranscription: {},
+            outputAudioTranscription: {}
+          }
+        };
+        dbg('out', tag + ' → open，送出 setup', setup);
+        ws.send(JSON.stringify(setup));
+      };
+      ws.onmessage = async ev => {
+        let text = ev.data;
+        if (typeof text !== 'string') text = await (text.text ? text.text() : new Response(text).text());
+        let msg; try { msg = JSON.parse(text); } catch { dbg('err', tag + ' ← 非 JSON 訊息', text.slice(0, 300)); return; }
+        dbg('in', tag + ' ←', msg);
+        this.handle(msg);
+      };
+      ws.onerror = () => { dbg('err', tag + ' ✕ WebSocket error 事件（瀏覽器不提供細節，請看下一行的 close）'); };
+      ws.onclose = ev => {
+        dbg('err', tag + ' ✕ close', { code: ev.code, reason: ev.reason, wasClean: ev.wasClean,
+          current: ws === this.ws, running: S.running });
+        this.ready = false;
+        if (ws !== this.ws || !S.running) return;
+        const reason = ev.reason || '';
+        if (/api key|API_KEY|permission|not found|unsupported|invalid/i.test(reason) || ev.code === 1008) {
+          setStatus('連線被拒：' + (reason || ev.code) + '（請檢查 API key 或模型名稱）', 'err');
+          stop(true);
+          return;
+        }
+        this.retry = Math.min(this.retry + 1, 5);
+        setStatus('連線中斷，重新連線中…' + (reason ? '（' + reason + '）' : ''), 'err');
+        setTimeout(() => { if (S.running && ws === this.ws) this.connect(); }, 800 * this.retry);
+      };
+    }
+    handle(msg){
+      if (msg.setupComplete) {
+        this.ready = true; this.retry = 0;
+        if (S.sessions.every(s => s.ready)) setStatus('聆聽中…請說話', 'on');
+        return;
+      }
+      if (msg.goAway) {                 // 伺服器即將結束這條連線，主動換新的
+        const old = this.ws; this.connect();
+        setTimeout(() => { try { old.close(); } catch {} }, 1500);
+        return;
+      }
+      const c = msg.serverContent;
+      if (!c) return;
+      const it = c.inputTranscription;
+      if (it && it.text && it.text.trim()) {
+        // 實測：每句的 inputTranscription（帶 languageCode）比翻譯語音早約 250ms 到，可以拿來判斷要不要翻
+        if (it.languageCode && it.languageCode !== this.inLang) {
+          this.inLang = it.languageCode;
+          if (this.isEcho()) {
+            dbg('sys', this.tag + ' 輸入語言是 ' + this.inLang + '，和目標相同，這條連線略過輸出');
+            this.resetTurn();
+          }
+        }
+        if (!this.isEcho()) {
+          this.inText += it.text;
+          if (this.bubble) this.bubble.querySelector('.orig').textContent = this.inText.trim();
+          this.touch();
+        }
+      }
+      // 實測：echoTargetLanguage:false 不可靠，有時候仍會把原句（文字和語音）照念一次，所以自己過濾
+      if (this.isEcho()) return;
+      if (c.outputTranscription && c.outputTranscription.text && c.outputTranscription.text.trim()) {
+        if (!this.bubble) this.bubble = newBubble(this.role);
+        this.outText += c.outputTranscription.text;
+        this.bubble.querySelector('.orig').textContent = this.inText.trim();
+        this.bubble.querySelector('.trans').textContent = this.outText.trim();
+        this.touch();
+        scrollDown();
+      }
+      if (c.modelTurn && c.modelTurn.parts) {
+        let audible = false;
+        for (const p of c.modelTurn.parts) {
+          if (p.inlineData && p.inlineData.data && playPcm(p.inlineData.data)) audible = true;
+        }
+        if (audible) {
+          if (el.speak.checked) setStatus('播放翻譯中…', 'speak');
+          this.touch();
+        }
+      }
+      if (c.turnComplete) this.touch(600);
+    }
+    // 輸入已經是這條連線的目標語言（例如我說中文，而這條是翻成中文的）→ 不該輸出
+    isEcho(){ return !!this.inLang && baseLang(this.inLang) === baseLang(this.target); }
+    // 一段時間沒有新內容，就把這則泡泡收尾
+    touch(ms = 1800){
+      clearTimeout(this.idle);
+      this.idle = setTimeout(() => {
+        this.resetTurn();
+        if (S.running && S.sessions.every(s => s.ready)) setStatus('聆聽中…請說話', 'on');
+      }, ms);
+    }
+    resetTurn(){
+      if (this.bubble) this.bubble.classList.remove('live');
+      this.bubble = null; this.inText = ''; this.outText = '';
+    }
+    send(b64){
+      if (this.ready && this.ws && this.ws.readyState === 1) {
+        this.ws.send(JSON.stringify({ realtimeInput: { audio: { data: b64, mimeType: 'audio/pcm;rate=16000' } } }));
+        this.sent = (this.sent || 0) + 1;
+        if (this.sent % 50 === 0) dbg('out', this.tag + ' → 已送出 ' + this.sent + ' 包音訊（每包 100ms）');
+      }
+    }
+    close(){
+      clearTimeout(this.idle);
+      this.resetTurn();
+      const ws = this.ws; this.ws = null;
+      try { ws && ws.close(); } catch {}
+    }
+  }
+
+  // ---------- 麥克風 → 16kHz PCM16，每 100ms 一包 ----------
+  const WORKLET = `
+    class Down16k extends AudioWorkletProcessor {
+      constructor(){ super(); this.ratio = sampleRate / 16000; this.acc = 0; this.sum = 0; this.cnt = 0;
+        this.out = new Int16Array(1600); this.n = 0; }
+      process(inputs){
+        const ch = inputs[0] && inputs[0][0];
+        if (!ch) return true;
+        for (let i = 0; i < ch.length; i++) {
+          this.sum += ch[i]; this.cnt++; this.acc += 1;
+          if (this.acc >= this.ratio) {
+            this.acc -= this.ratio;
+            let v = this.sum / this.cnt; this.sum = 0; this.cnt = 0;
+            v = Math.max(-1, Math.min(1, v));
+            this.out[this.n++] = v < 0 ? v * 32768 : v * 32767;
+            if (this.n === this.out.length) { this.port.postMessage(this.out.slice(0)); this.n = 0; }
+          }
+        }
+        return true;
+      }
+    }
+    registerProcessor('down16k', Down16k);`;
+
+  function onChunk(int16){
+    if (!S.running) return;
+    // 播放翻譯語音時送靜音，避免喇叭聲被收進去又翻一次
+    if (el.speak.checked && isPlaying()) int16 = new Int16Array(int16.length);
+    const b64 = int16ToBase64(int16);
+    for (const s of S.sessions) s.send(b64);
+  }
+
+  async function startMic(){
+    S.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    S.source = S.ctx.createMediaStreamSource(S.stream);
+    S.sink = S.ctx.createGain(); S.sink.gain.value = 0; S.sink.connect(S.ctx.destination);
+    try {
+      const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
+      await S.ctx.audioWorklet.addModule(url);
+      S.node = new AudioWorkletNode(S.ctx, 'down16k');
+      S.node.port.onmessage = e => onChunk(e.data);
+    } catch (err) {
+      // 舊瀏覽器備援：ScriptProcessor
+      const ratio = S.ctx.sampleRate / 16000;
+      let acc = 0, sum = 0, cnt = 0, out = new Int16Array(1600), n = 0;
+      S.node = S.ctx.createScriptProcessor(4096, 1, 1);
+      S.node.onaudioprocess = e => {
+        const ch = e.inputBuffer.getChannelData(0);
+        for (let i = 0; i < ch.length; i++) {
+          sum += ch[i]; cnt++; acc += 1;
+          if (acc >= ratio) {
+            acc -= ratio;
+            let v = Math.max(-1, Math.min(1, sum / cnt)); sum = 0; cnt = 0;
+            out[n++] = v < 0 ? v * 32768 : v * 32767;
+            if (n === out.length) { onChunk(out.slice(0)); n = 0; }
+          }
+        }
+      };
+    }
+    S.source.connect(S.node);
+    S.node.connect(S.sink);
+  }
+
+  // ---------- 開始 / 停止 ----------
+  async function start(){
+    const key = el.apiKey.value.trim();
+    if (!key) { el.settings.classList.add('open'); setStatus('請先在設定貼上 API key', 'err'); el.apiKey.focus(); return; }
+    if (el.langMe.value === el.langOther.value) { setStatus('兩邊語言不能一樣', 'err'); return; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('這個瀏覽器無法使用麥克風（需要 HTTPS 網址）', 'err'); return;
+    }
+    store.set('key', key);
+    el.settings.classList.remove('open');
+    S.running = true;
+    el.main.textContent = '停止'; el.main.classList.add('stop');
+    setStatus('啟動中…');
+    try {
+      S.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      await S.ctx.resume();
+      S.nextPlay = 0; S.playUntil = 0;
+      await startMic();
+    } catch (err) {
+      setStatus('無法開啟麥克風：' + (err && err.message || err), 'err');
+      stop(true); return;
+    }
+    const mode = el.mode.value;
+    if (mode !== 'toMe') S.sessions.push(new Session('toOther', el.langOther.value));
+    if (mode !== 'toOther') S.sessions.push(new Session('toMe', el.langMe.value));
+    setStatus('連線中…');
+    requestWakeLock();
+  }
+
+  function stop(keepStatus){
+    S.running = false;
+    for (const s of S.sessions) s.close();
+    S.sessions = [];
+    try { S.node && S.node.disconnect(); } catch {}
+    try { S.source && S.source.disconnect(); } catch {}
+    if (S.stream) S.stream.getTracks().forEach(t => t.stop());
+    if (S.ctx) { S.ctx.close().catch(() => {}); }
+    S.ctx = S.stream = S.source = S.node = S.sink = null;
+    if (S.wakeLock) { S.wakeLock.release().catch(() => {}); S.wakeLock = null; }
+    el.main.textContent = '開始口譯'; el.main.classList.remove('stop');
+    if (!keepStatus) setStatus('已停止');
+  }
+
+  async function requestWakeLock(){
+    try { if ('wakeLock' in navigator) S.wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && S.running) {
+      requestWakeLock();
+      if (S.ctx && S.ctx.state !== 'running') S.ctx.resume().catch(() => {});
+    }
+  });
+
+  el.main.onclick = () => (S.running ? stop() : start());
+})();
+</script>
+</body>
+</html>
