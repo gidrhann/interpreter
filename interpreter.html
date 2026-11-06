@@ -112,8 +112,8 @@
   <label for="autoPause">沒人說話多久自動暫停（省免費額度，有人說話會自動恢復）</label>
   <select id="autoPause">
     <option value="0">不要自動暫停</option>
-    <option value="60000">1 分鐘</option>
-    <option value="120000">2 分鐘（建議）</option>
+    <option value="60000">1 分鐘（建議）</option>
+    <option value="120000">2 分鐘</option>
     <option value="300000">5 分鐘</option>
   </select>
   <label for="model">模型名稱（進階，通常不用改）</label>
@@ -186,8 +186,8 @@
   el.wait.value = store.get('wait', '1200');
   if (!el.wait.value) el.wait.value = '1200';
   el.wait.onchange = () => store.set('wait', el.wait.value);
-  el.autoPause.value = store.get('autoPause', '120000');
-  if (!el.autoPause.value) el.autoPause.value = '120000';
+  el.autoPause.value = store.get('autoPause', '60000');
+  if (!el.autoPause.value) el.autoPause.value = '60000';
   el.autoPause.onchange = () => store.set('autoPause', el.autoPause.value);
   el.model.onchange = () => store.set('model', el.model.value.trim() || DEFAULT_MODEL);
   if (!el.apiKey.value) el.settings.classList.add('open');
