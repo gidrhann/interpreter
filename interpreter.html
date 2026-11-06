@@ -57,6 +57,16 @@
   .tools{display:flex;gap:8px;margin-top:10px}
   .tools button{flex:1;padding:8px 4px;font-size:14px;white-space:nowrap}
   .tools button.narrow{flex:0 0 48px}
+  #ptt{display:none;gap:10px;margin-bottom:10px}
+  #ptt.show{display:flex}
+  #ptt button{flex:1;min-height:76px;border-radius:16px;border:2px solid var(--accent);background:var(--panel);color:var(--text);
+    font-size:17px;font-weight:600;line-height:1.3;padding:8px;user-select:none;-webkit-user-select:none;
+    -webkit-touch-callout:none;touch-action:none}
+  #ptt button b{display:block;font-size:18px}
+  #ptt button small{display:block;font-size:13px;font-weight:400;opacity:.8;margin-top:2px}
+  #ptt button#pttThem{border-color:#94a3b8}
+  #ptt button.active{background:var(--accent);color:#082f49;transform:scale(.98)}
+  #ptt button#pttThem.active{background:#cbd5e1}
   .langrow{display:flex;gap:8px;align-items:flex-end}
   .langrow>div{flex:1;min-width:0}
   #swapLang{flex:none;height:44px;width:44px;padding:0;font-size:20px}
@@ -106,6 +116,11 @@
     <option value="toOther">只翻成對方語言</option>
     <option value="toMe">只翻成我的語言</option>
   </select>
+  <label for="input">收音方式</label>
+  <select id="input">
+    <option value="auto">自動（一直聽，自動判斷誰在說話）</option>
+    <option value="ptt">按住說話（吵雜環境用，按鈕決定誰在說話）</option>
+  </select>
   <label class="check"><input type="checkbox" id="speak" checked> 播放翻譯語音（關掉就只看字幕）</label>
   <label for="wait">翻譯語音什麼時候播</label>
   <select id="wait">
@@ -140,6 +155,10 @@
 
 <footer>
   <div id="status"><span class="dot" id="dot"></span><span id="statusText">尚未開始</span></div>
+  <div id="ptt">
+    <button id="pttMe">按住：我說</button>
+    <button id="pttThem">按住：對方說</button>
+  </div>
   <button id="main">開始口譯</button>
   <div class="tools">
     <button class="iconbtn narrow" id="fontDown" title="字小一點" aria-label="字小一點">A−</button>
@@ -171,7 +190,7 @@
   const $ = id => document.getElementById(id);
   const el = {
     settings:$('settings'), apiKey:$('apiKey'), langMe:$('langMe'), langOther:$('langOther'),
-    mode:$('mode'), speak:$('speak'), wait:$('wait'), autoPause:$('autoPause'), model:$('model'), log:$('log'), empty:$('empty'),
+    mode:$('mode'), input:$('input'), speak:$('speak'), wait:$('wait'), autoPause:$('autoPause'), model:$('model'), log:$('log'), empty:$('empty'),
     dot:$('dot'), statusText:$('statusText'), main:$('main'), overlay:$('overlay'), overlayText:$('overlayText')
   };
 
@@ -197,6 +216,9 @@
   el.langMe.onchange = () => store.set('me', el.langMe.value);
   el.langOther.onchange = () => store.set('other', el.langOther.value);
   el.mode.onchange = () => store.set('mode', el.mode.value);
+  el.input.value = store.get('input', 'auto');
+  if (!el.input.value) el.input.value = 'auto';
+  el.input.onchange = () => store.set('input', el.input.value);
   el.speak.onchange = () => store.set('speak', el.speak.checked ? '1' : '0');
   el.wait.value = store.get('wait', '1200');
   if (!el.wait.value) el.wait.value = '1200';
@@ -209,6 +231,7 @@
   $('toggleSettings').onclick = () => el.settings.classList.toggle('open');
 
   function setStatus(text, kind){
+    if (S.pttMode && S.running && text === '聆聽中…請說話') text = '準備好了：按住下方按鈕說話';
     if (el.statusText.textContent === text && el.dot.className === 'dot' + (kind ? ' ' + kind : '')) return;
     el.statusText.textContent = text;
     el.dot.className = 'dot' + (kind ? ' ' + kind : '');
@@ -839,6 +862,7 @@
 
   function onChunk(int16){
     if (!S.running) return;
+    if (S.pttMode) return onChunkPtt(int16);
     const before = S.lastVoice;
     trackVoice(int16);          // 用真正的麥克風音量判斷有沒有人在說話（要在換成靜音之前）
     if (S.paused) {
@@ -854,6 +878,71 @@
     if (el.speak.checked && isPlaying()) int16 = new Int16Array(int16.length);
     const b64 = int16ToBase64(int16);
     for (const s of S.sessions) s.send(b64);
+  }
+
+  // ---------- 按住說話（吵雜環境用） ----------
+  // 兩顆按鈕直接決定翻譯方向：按住「我說」→ 麥克風只送給翻成對方語言的連線；按住「對方說」→ 只送給翻成我的語言的連線。
+  // 沒按的時候兩條連線都只收到靜音，所以環境雜音不會被翻譯，也不用靠自動判斷語言。
+  // 按住時一律當作「有人在說話」：翻譯語音等放開才播；按下時如果正在播，立刻停掉讓人插話。
+  const SILENCE_B64 = int16ToBase64(new Int16Array(1600));
+  function onChunkPtt(int16){
+    if (S.ptt) S.lastVoice = performance.now();
+    if (S.paused) {
+      if (S.ptt) {
+        S.preroll.push(int16ToBase64(int16));
+        if (S.preroll.length > PREROLL_CHUNKS) S.preroll.shift();
+        resumeFromPause();
+      }
+      return;
+    }
+    pump();
+    maybeAutoPause();
+    if (S.paused) return;
+    const b64 = S.ptt ? int16ToBase64(int16) : null;
+    for (const s of S.sessions) s.send(S.ptt === s.role ? b64 : SILENCE_B64);
+  }
+  function stopPlayback(){
+    if (!S.ctx) return;
+    let n = 0;
+    for (const s of S.sessions) {
+      n += s.q.length; s.q = [];
+      for (const r of s.srcs.slice()) { try { r.src.stop(); n++; } catch {} }
+    }
+    S.nextPlay = S.playUntil = S.ctx.currentTime;
+    if (n) dbg('sys', '[按住說話] 有人插話，停止播放中的翻譯');
+  }
+  function pttDown(role, btn, ev){
+    if (!S.running) return;
+    ev.preventDefault();
+    try { btn.setPointerCapture(ev.pointerId); } catch {}
+    S.ptt = role; S.lastVoice = performance.now();
+    btn.classList.add('active');
+    stopPlayback();
+    setStatus(role === 'toOther' ? '收音中：我說話…（放開就翻譯）' : '收音中：對方說話…（放開就翻譯）', 'on');
+  }
+  function pttUp(btn){
+    if (!S.ptt) return;
+    S.ptt = null; S.lastVoice = performance.now();
+    btn.classList.remove('active');
+    setStatus('翻譯中…', 'on');
+  }
+  for (const [id, role] of [['pttMe', 'toOther'], ['pttThem', 'toMe']]) {
+    const btn = $(id);
+    btn.addEventListener('pointerdown', ev => pttDown(role, btn, ev));
+    for (const t of ['pointerup', 'pointercancel', 'lostpointercapture']) btn.addEventListener(t, () => pttUp(btn));
+    btn.addEventListener('contextmenu', ev => ev.preventDefault());   // 長按不要跳出選單
+  }
+  function updatePttUi(){
+    const show = S.running && S.pttMode;
+    $('ptt').classList.toggle('show', show);
+    $('pttMe').hidden = !S.sessions.some(s => s.role === 'toOther');
+    $('pttThem').hidden = !S.sessions.some(s => s.role === 'toMe');
+    for (const [id, who, lang] of [['pttMe', '按住：我說', S.langMe || el.langMe.value], ['pttThem', '按住：對方說', S.langOther || el.langOther.value]]) {
+      const b = $(id); b.textContent = '';
+      const big = document.createElement('b'); big.textContent = who;
+      const small = document.createElement('small'); small.textContent = langName(lang);
+      b.append(big, small);
+    }
   }
 
   // 開麥克風串流，並監看系統中斷（iOS 切到背景、來電時常發生）
@@ -971,6 +1060,7 @@
       S.nextPlay = 0; S.playUntil = 0; S.silentRun = 0; S.playOwner = null;
       S.waitLogged = false; S.lastVoice = 0; S.noise = 0;
       S.paused = false; S.preroll = []; S.lastOut = 0; S.startedAt = performance.now();
+      S.pttMode = el.input.value === 'ptt'; S.ptt = null;
       await startMic();
     } catch (err) {
       setStatus('無法開啟麥克風：' + (err && err.message || err), 'err');
@@ -980,6 +1070,7 @@
     if (mode !== 'toMe') S.sessions.push(new Session('toOther', el.langOther.value));
     if (mode !== 'toOther') S.sessions.push(new Session('toMe', el.langMe.value));
     setStatus('連線中…');
+    updatePttUi();
     requestWakeLock();
   }
 
@@ -994,6 +1085,8 @@
     if (S.ctx) { S.ctx.close().catch(() => {}); }
     S.ctx = S.stream = S.source = S.node = S.sink = null;
     if (S.wakeLock) { S.wakeLock.release().catch(() => {}); S.wakeLock = null; }
+    S.ptt = null;
+    updatePttUi();
     el.main.textContent = '開始口譯'; el.main.classList.remove('stop');
     if (!keepStatus) setStatus('已停止');
   }
