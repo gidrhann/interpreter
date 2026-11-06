@@ -277,6 +277,7 @@
   }
   const waitMs = () => Number(el.wait.value) || 0;
   const userSpeaking = () => waitMs() > 0 && performance.now() - S.lastVoice < waitMs();
+  const NEW_SENTENCE_GAP = 2000;  // 同一條連線超過 2 秒沒有新原文 → 當作新的一句
   const QUEUE_MAX = 240;          // 每條連線最多暫存 60 秒
 
   // ---------- 播放排程：每條連線各自一個佇列，同一時間只播一條，絕不交錯 ----------
@@ -385,28 +386,65 @@
     for (const s of S.sessions) s.resetTurn();
   };
 
+  // ---------- 連線錯誤：翻成中文，並判斷要不要重試 ----------
+  // 實測過的：無效 key → 1007 "API key not valid"；預付額度用完 → 1011 "prepayment credits are depleted"；
+  // 設定格式錯 → 1007 "Invalid JSON payload"；接續 handle 失效 → 1008 "session not found"（可改開新連線，不算致命）。
+  function explainClose(code, reason){
+    const r = reason || '';
+    const fatal = msg => ({ fatal: true, msg });
+    if (/session not found/i.test(r)) return { fatal: false, resetHandle: true, msg: '接續失敗，改開新連線' };
+    if (/API key not valid|API_KEY_INVALID|API key expired/i.test(r)) return fatal('API key 無效或已過期，請到「設定」重新貼上正確的 key');
+    if (/prepayment|credits are depleted|billing/i.test(r))
+      return fatal('這把 key 所屬的專案綁了付費帳單，而且預付額度用完了。請改用「沒有綁帳單」的專案建立的 key（免費方案）');
+    if (/quota|RESOURCE_EXHAUSTED|rate limit|too many requests|exceeded/i.test(r))
+      return fatal('免費額度用完，或短時間內使用太頻繁。每分鐘的限制等一下就恢復；每日額度在台灣時間下午 3～4 點重置。'
+        + '「雙向自動」會同時用 2 條連線，改用單向模式（只翻成對方語言／只翻成我的語言）可以省一半額度');
+    if (/permission|PERMISSION_DENIED|has not been used|is disabled|forbidden/i.test(r))
+      return fatal('這把 key 沒有使用權限（可能專案沒有啟用 Gemini API），請到 AI Studio 重新建立 key');
+    if (/location|region|country/i.test(r)) return fatal('目前所在地區無法使用這個服務');
+    if (/not found|is not supported|unsupported model/i.test(r))
+      return fatal('找不到模型「' + (el.model.value.trim() || DEFAULT_MODEL) + '」，請到「設定」檢查模型名稱（通常不用改）');
+    if (/Invalid JSON|Unknown name|Cannot find field|invalid argument/i.test(r))
+      return fatal('伺服器不接受 app 送出的設定（程式可能需要更新）：' + r);
+    if (!navigator.onLine) return { fatal: false, offline: true, msg: '網路斷線' };
+    if (code === 1006 || !r) return { fatal: false, msg: '連線中斷' };
+    return { fatal: false, msg: '連線中斷（' + r + '）' };
+  }
+  const RETRY_DELAYS = [1000, 2000, 4000, 8000, 15000];   // 最多重試 5 次
+
   // ---------- 一條 Live 翻譯連線 ----------
+  // 連線時間：官方文件說純音訊 session 上限 15 分鐘、單一連線約 10 分鐘。
+  // 對策（實測翻譯模型可用，欄位要放 setup 頂層）：
+  // - contextWindowCompression: { slidingWindow: {} } → 解除 session 時間上限
+  // - sessionResumption → 伺服器會發 handle（有語音內容時約每 1～2 秒一個），換線時帶上就能接續
+  // - 收到 goAway 時先開新連線，新連線 setupComplete 前音訊繼續送舊連線，準備好才切換（無縫換線）
   class Session {
     constructor(role, target){
       this.role = role;          // 'toOther'：我說話；'toMe'：對方說話
       this.target = target;
-      this.ws = null; this.ready = false; this.retry = 0;
+      this.tag = '[→' + target + ']';
+      this.ws = null;            // 正在使用的連線
+      this.next = null;          // 換線中：還沒準備好的新連線
+      this.ready = false; this.retry = 0; this.retryTimer = null;
+      this.resumeHandle = null;  // 最新的 session resumption handle
       this.inText = ''; this.outText = ''; this.bubble = null; this.idle = null;
       this.inLang = '';          // 最近一次 inputTranscription 的 languageCode
+      this.lastInAt = 0;         // 最近一次收到原文逐字稿的時間
       this.q = [];               // 這條連線還沒排進播放的語音
-      this.connect();
+      this.open(false);
     }
-    connect(){
+    // swap=true：換線（舊連線繼續用到新連線準備好）；false：第一次連線或斷線重連
+    open(swap){
       const key = el.apiKey.value.trim();
       const model = el.model.value.trim() || DEFAULT_MODEL;
-      this.ready = false;
-      const tag = '[→' + this.target + ']';
-      this.tag = tag;
-      dbg('sys', tag + ' 連線中（key 不顯示）', WS_BASE);
+      const tag = this.tag;
+      const handle = this.resumeHandle;
+      dbg('sys', tag + (swap ? ' 換線：開新連線' : ' 連線中') + (handle ? '（帶接續 handle）' : '') + '（key 不顯示）');
       const ws = new WebSocket(WS_BASE + '?key=' + encodeURIComponent(key));
-      this.ws = ws;
+      ws.openedAt = performance.now();
+      if (swap) this.next = ws; else { this.ws = ws; this.ready = false; }
       ws.onopen = () => {
-        // 實測（2026-11-06）：兩個 *AudioTranscription 必須放在 setup 頂層，
+        // 實測（2026-11-06）：*AudioTranscription、contextWindowCompression、sessionResumption 都必須放在 setup 頂層，
         // 放進 generationConfig 會被 1007 拒絕；translationConfig 則必須在 generationConfig 裡。
         const setup = {
           setup: {
@@ -416,7 +454,9 @@
               translationConfig: { targetLanguageCode: this.target, echoTargetLanguage: false }
             },
             inputAudioTranscription: {},
-            outputAudioTranscription: {}
+            outputAudioTranscription: {},
+            contextWindowCompression: { slidingWindow: {} },
+            sessionResumption: handle ? { handle } : {}
           }
         };
         dbg('out', tag + ' → open，送出 setup', setup);
@@ -427,36 +467,72 @@
         if (typeof text !== 'string') text = await (text.text ? text.text() : new Response(text).text());
         let msg; try { msg = JSON.parse(text); } catch { dbg('err', tag + ' ← 非 JSON 訊息', text.slice(0, 300)); return; }
         dbg('in', tag + ' ←', msg);
-        this.handle(msg);
+        this.onMessage(ws, msg);
       };
       ws.onerror = () => { dbg('err', tag + ' ✕ WebSocket error 事件（瀏覽器不提供細節，請看下一行的 close）'); };
-      ws.onclose = ev => {
-        dbg('err', tag + ' ✕ close', { code: ev.code, reason: ev.reason, wasClean: ev.wasClean,
-          current: ws === this.ws, running: S.running });
-        this.ready = false;
-        if (ws !== this.ws || !S.running) return;
-        const reason = ev.reason || '';
-        if (/api key|API_KEY|permission|not found|unsupported|invalid/i.test(reason) || ev.code === 1008) {
-          setStatus('連線被拒：' + (reason || ev.code) + '（請檢查 API key 或模型名稱）', 'err');
-          stop(true);
-          return;
+      ws.onclose = ev => this.onClose(ws, ev);
+    }
+    onMessage(ws, msg){
+      if (msg.setupComplete) {
+        if (ws === this.next) {                 // 換線完成：切到新連線，舊連線留 3 秒收完還在路上的翻譯
+          const old = this.ws;
+          this.ws = ws; this.next = null;
+          if (old) { old.retiring = true; setTimeout(() => { try { old.close(); } catch {} }, 3000); }
+          dbg('sys', this.tag + ' 換線完成');
         }
-        this.retry = Math.min(this.retry + 1, 5);
-        setStatus('連線中斷，重新連線中…' + (reason ? '（' + reason + '）' : ''), 'err');
-        setTimeout(() => { if (S.running && ws === this.ws) this.connect(); }, 800 * this.retry);
-      };
+        if (ws === this.ws) {
+          this.ready = true; this.retry = 0;
+          if (S.sessions.every(s => s.ready)) setStatus('聆聽中…請說話', 'on');
+        }
+        return;
+      }
+      if (msg.sessionResumptionUpdate) {
+        const u = msg.sessionResumptionUpdate;
+        if (ws === this.ws && u.resumable !== false && u.newHandle) this.resumeHandle = u.newHandle;
+      }
+      if (msg.goAway) {                         // 伺服器即將結束這條連線 → 無縫換線
+        dbg('sys', this.tag + ' 收到 goAway（剩 ' + (msg.goAway.timeLeft || '?') + '），這條連線用了 '
+          + Math.round((performance.now() - ws.openedAt) / 1000) + ' 秒');
+        if (ws === this.ws && !this.next && S.running) this.open(true);
+        return;
+      }
+      if (ws === this.ws || ws.retiring) this.handle(msg);
+    }
+    onClose(ws, ev){
+      dbg('err', this.tag + ' ✕ close', { code: ev.code, reason: ev.reason, wasClean: ev.wasClean,
+        active: ws === this.ws, swapping: ws === this.next, retiring: !!ws.retiring, running: S.running });
+      if (ws.retiring || !S.running) return;
+      if (ws !== this.ws && ws !== this.next) return;
+      const why = explainClose(ev.code, ev.reason);
+      if (why.fatal) { setStatus(why.msg, 'err'); stop(true); return; }
+      if (why.resetHandle) this.resumeHandle = null;
+      if (ws === this.next) {                   // 換線失敗：舊連線還能用，稍後再換
+        this.next = null;
+        setTimeout(() => { if (S.running && !this.next && this.ws && this.ws.readyState === 1) this.open(true); }, 1000);
+        return;
+      }
+      // 正在用的連線斷了 → 重連（有 handle 就接續）
+      this.ready = false;
+      if (this.next) { dbg('sys', this.tag + ' 舊連線先斷了，等新連線準備好'); return; }
+      this.scheduleRetry(why);
+    }
+    scheduleRetry(why){
+      clearTimeout(this.retryTimer);
+      if (why.offline) {                        // 離線不算次數，等網路恢復
+        setStatus('網路斷線，等網路恢復後會自動重新連線…', 'err');
+        window.addEventListener('online', () => { if (S.running && !this.ready) this.open(false); }, { once: true });
+        return;
+      }
+      if (this.retry >= RETRY_DELAYS.length) {
+        setStatus('連線一直失敗（已重試 ' + RETRY_DELAYS.length + ' 次）：' + why.msg + '。請確認網路後再按「開始口譯」', 'err');
+        stop(true);
+        return;
+      }
+      const delay = RETRY_DELAYS[this.retry++];
+      setStatus(why.msg + '，' + Math.round(delay / 1000) + ' 秒後重新連線（第 ' + this.retry + '/' + RETRY_DELAYS.length + ' 次）…', 'err');
+      this.retryTimer = setTimeout(() => { if (S.running && !this.ready) this.open(false); }, delay);
     }
     handle(msg){
-      if (msg.setupComplete) {
-        this.ready = true; this.retry = 0;
-        if (S.sessions.every(s => s.ready)) setStatus('聆聽中…請說話', 'on');
-        return;
-      }
-      if (msg.goAway) {                 // 伺服器即將結束這條連線，主動換新的
-        const old = this.ws; this.connect();
-        setTimeout(() => { try { old.close(); } catch {} }, 1500);
-        return;
-      }
       const c = msg.serverContent;
       if (!c) return;
       const it = c.inputTranscription;
@@ -470,6 +546,10 @@
           }
         }
         if (!this.isEcho()) {
+          // 超過 2 秒沒有新原文、而且這則泡泡已經有翻譯 → 是新的一句，開新泡泡，避免原文混到上一句
+          const now = performance.now();
+          if (this.outText && now - this.lastInAt > NEW_SENTENCE_GAP) this.resetTurn();
+          this.lastInAt = now;
           this.inText += it.text;
           if (this.bubble) this.bubble.querySelector('.orig').textContent = this.inText.trim();
           this.touch();
@@ -521,11 +601,11 @@
       }
     }
     close(){
-      clearTimeout(this.idle);
+      clearTimeout(this.idle); clearTimeout(this.retryTimer);
       this.resetTurn();
       this.q = [];
-      const ws = this.ws; this.ws = null;
-      try { ws && ws.close(); } catch {}
+      for (const ws of [this.ws, this.next]) { if (ws) { ws.retiring = true; try { ws.close(); } catch {} } }
+      this.ws = this.next = null; this.ready = false;
     }
   }
 

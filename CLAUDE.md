@@ -12,7 +12,12 @@
 - **setup 欄位位置**（2026-11-06 實測，伺服器以 close 1007 回報 schema 錯誤，且在檢查 key 之前就驗證）：
   - `translationConfig` 必須在 `setup.generationConfig` 裡（放頂層會被拒）。
   - `inputAudioTranscription`、`outputAudioTranscription` 必須在 `setup` 頂層（放進 `generationConfig` 會被拒；官方翻譯指南的範例是錯的）。
+  - `contextWindowCompression`、`sessionResumption` 也必須在 `setup` 頂層（放進 `generationConfig` 會被拒）。翻譯模型接受這兩個設定。
 - 無效 key：close code `1007`，reason `API key not valid. Please pass a valid API key.`
+- 設定 `sessionResumption: {}` 後，有語音內容時伺服器約每 1～2 秒送一次 `sessionResumptionUpdate`（`newHandle` 長度 36、`resumable: true`）；只有靜音時不會發。不設定就拿不到 handle。
+- 用 handle 重連可以成功接續；handle 無效時 close `1008`，reason `BidiGenerateContent session not found`（不是致命錯誤，丟掉 handle 開新連線即可）。
+- **單一連線約 9 分 50 秒**：13 分鐘耐久測試中，第 540 秒收到 `goAway: { timeLeft: "50s" }`；帶 handle 換線 0.7 秒完成，之後翻譯照常（2026-11-06 實測）。app 收到 goAway 就無縫換線（`Session.open(true)`）。
+- 免費額度用完時的實際 close code / reason **尚未實測**，`explainClose()` 目前用 quota / RESOURCE_EXHAUSTED / rate limit 等字樣比對。遇到時請把除錯紀錄的 close 那行補進來。
 - 專案綁了預付帳單且額度用完：close `1011`，reason `Your prepayment credits are depleted...`。付費專案不會退回免費額度，要用**沒綁帳單**的專案的 key。
 - close reason 會被截斷在約 123 bytes。
 

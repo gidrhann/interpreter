@@ -64,7 +64,8 @@ class Conn {
       ws.onopen = () => ws.send(JSON.stringify({ setup: { model: 'models/' + MODEL,
         generationConfig: { responseModalities: ['AUDIO'],
           translationConfig: { targetLanguageCode: this.target, echoTargetLanguage: false } },
-        inputAudioTranscription: {}, outputAudioTranscription: {} } }));
+        inputAudioTranscription: {}, outputAudioTranscription: {},
+        contextWindowCompression: { slidingWindow: {} }, sessionResumption: {} } }));
       ws.onmessage = ev => {
         const text = typeof ev.data === 'string' ? ev.data : Buffer.from(ev.data).toString('utf8');
         let m; try { m = JSON.parse(text); } catch { this.log.push('非 JSON：' + text.slice(0, 200)); return; }
