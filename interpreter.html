@@ -45,6 +45,13 @@
   .msg .orig{font-size:calc(13px * var(--fs, 1));opacity:.75;margin-bottom:4px}
   .msg .trans{font-size:calc(19px * var(--fs, 1));line-height:1.45}
   .msg.live .trans::after{content:" ▍";opacity:.6}
+  /* 演講模式：連續逐字稿，不用對話泡泡 */
+  .msg.lec{max-width:100%;align-self:stretch;background:none;border-radius:0;padding:10px 4px;border-bottom:1px solid var(--line)}
+  .msg.lec .orig{font-size:calc(14px * var(--fs, 1));opacity:.8;line-height:1.5;margin-bottom:6px}
+  .msg.lec .trans{font-size:calc(18px * var(--fs, 1))}
+  #lecTools[hidden]{display:none}
+  #lecTools button{white-space:normal;min-width:0;font-size:13px;line-height:1.25}
+  .tools button{min-width:0}
   .msg .live-trans{font-size:calc(12px * var(--fs, 1));opacity:.6;margin-top:6px;line-height:1.4}
   .msg.polishing .trans::after{content:" ⋯";opacity:.6}
   footer{padding:12px 16px 16px;border-top:1px solid var(--line)}
@@ -112,7 +119,12 @@
       <select id="langOther"></select>
     </div>
   </div>
-  <label for="mode">翻譯方向</label>
+  <label for="scene">使用情境</label>
+  <select id="scene">
+    <option value="clinic">看診對話（雙向翻譯、播放語音）</option>
+    <option value="lecture">聽演講（對方語言 → 我的語言，逐字稿＋翻譯，不播語音）</option>
+  </select>
+  <label for="mode">翻譯方向（看診對話用）</label>
   <select id="mode">
     <option value="both">雙向自動（偵測誰在說話）</option>
     <option value="toOther">只翻成對方語言</option>
@@ -163,6 +175,11 @@
     <button id="pttThem">按住：對方說</button>
   </div>
   <button id="main">開始口譯</button>
+  <div class="tools" id="lecTools" hidden>
+    <button class="iconbtn" id="lecShare">AI 整理（分享）</button>
+    <button class="iconbtn" id="lecCopy">複製＋整理指令</button>
+    <button class="iconbtn" id="lecDownload">下載 .txt</button>
+  </div>
   <div class="tools">
     <button class="iconbtn narrow" id="fontDown" title="字小一點" aria-label="字小一點">A−</button>
     <button class="iconbtn narrow" id="fontUp" title="字大一點" aria-label="字大一點">A＋</button>
@@ -193,7 +210,7 @@
   const $ = id => document.getElementById(id);
   const el = {
     settings:$('settings'), apiKey:$('apiKey'), langMe:$('langMe'), langOther:$('langOther'),
-    mode:$('mode'), input:$('input'), speak:$('speak'), polish:$('polish'), wait:$('wait'), autoPause:$('autoPause'), model:$('model'), log:$('log'), empty:$('empty'),
+    mode:$('mode'), scene:$('scene'), input:$('input'), speak:$('speak'), polish:$('polish'), wait:$('wait'), autoPause:$('autoPause'), model:$('model'), log:$('log'), empty:$('empty'),
     dot:$('dot'), statusText:$('statusText'), main:$('main'), overlay:$('overlay'), overlayText:$('overlayText')
   };
 
@@ -219,6 +236,9 @@
   el.langMe.onchange = () => store.set('me', el.langMe.value);
   el.langOther.onchange = () => store.set('other', el.langOther.value);
   el.mode.onchange = () => store.set('mode', el.mode.value);
+  el.scene.value = store.get('scene', 'clinic');
+  if (!el.scene.value) el.scene.value = 'clinic';
+  el.scene.onchange = () => { store.set('scene', el.scene.value); updateSceneUi(); };
   el.input.value = store.get('input', 'auto');
   if (!el.input.value) el.input.value = 'auto';
   el.input.onchange = () => store.set('input', el.input.value);
@@ -349,7 +369,7 @@
     const pcm = base64ToInt16(b64);
     if (!pcm.length) return false;
     const audible = isAudible(pcm);
-    if (!el.speak.checked || !S.ctx) return audible;
+    if (S.lecture || !el.speak.checked || !S.ctx) return audible;   // 演講模式只看字幕
     // 靜音包只有在這條連線正在播、或已經有暫存時才收（保住句中停頓的時間軸）
     if (audible || owner.q.length || owner === S.playOwner) {
       owner.q.push({ pcm, audible, at: performance.now(), turn: owner.turnId });
@@ -477,12 +497,14 @@
   function newBubble(role){
     if (el.empty) { el.empty.remove(); el.empty = null; }
     const div = document.createElement('div');
-    div.className = 'msg live ' + (role === 'toOther' ? 'me' : 'them');
+    div.className = 'msg live ' + (role === 'lecture' ? 'lec' : role === 'toOther' ? 'me' : 'them');
     div.innerHTML = '<div class="who"></div><div class="orig"></div><div class="trans"></div>';
-    div.querySelector('.who').textContent = role === 'toOther'
-      ? '我 → ' + langName(S.langOther || el.langOther.value)
-      : '對方 → ' + langName(S.langMe || el.langMe.value);
     div.dataset.time = new Date().toTimeString().slice(0, 8);
+    div.querySelector('.who').textContent = role === 'lecture'
+      ? div.dataset.time + '　' + langName(S.langOther) + ' → ' + langName(S.langMe)
+      : role === 'toOther'
+        ? '我 → ' + langName(S.langOther || el.langOther.value)
+        : '對方 → ' + langName(S.langMe || el.langMe.value);
     div.onclick = () => {
       el.overlayText.textContent = div.querySelector('.trans').textContent;
       el.overlay.classList.add('open');
@@ -490,7 +512,11 @@
     el.log.appendChild(div);
     return div;
   }
-  function scrollDown(){ el.log.scrollTop = el.log.scrollHeight; }
+  let stickBottom = true;
+  el.log.addEventListener('scroll', () => {
+    stickBottom = el.log.scrollHeight - el.log.scrollTop - el.log.clientHeight < 80;
+  }, { passive: true });
+  function scrollDown(force){ if (force || stickBottom) el.log.scrollTop = el.log.scrollHeight; }
   el.overlay.onclick = () => el.overlay.classList.remove('open');
   $('clear').onclick = () => {
     if (el.log.querySelector('.msg') && !confirm('確定要清除所有對話紀錄嗎？')) return;
@@ -534,6 +560,77 @@
     }
     setStatus('已複製 ' + lines.length + ' 則對話到剪貼簿（不會上傳）', S.running ? 'on' : '');
   };
+
+  // ---------- 演講模式：把逐字稿交給使用者自己的 AI App 整理 ----------
+  // 不呼叫任何 API：用手機分享選單送到 ChatGPT／Claude／Gemini App（使用者原本的訂閱），
+  // 或複製後自己貼上、或下載成 .txt。一小時的逐字稿太長，不用網址帶參數。
+  function lectureTranscript(){
+    const paras = [...el.log.querySelectorAll('.msg')];
+    if (!paras.length) return '';
+    const src = langName(S.langOther || el.langOther.value), tgt = langName(S.langMe || el.langMe.value);
+    const body = paras.map(m => {
+      const orig = m.querySelector('.orig').textContent.trim();
+      const trans = m.querySelector('.trans').textContent.trim();
+      return '[' + (m.dataset.time || '') + ']\n' + src + '：' + orig + '\n' + tgt + '：' + trans;
+    }).join('\n\n');
+    return '演講逐字稿（' + new Date().toLocaleDateString('zh-TW') + '，' + src + ' → ' + tgt + '）\n\n' + body;
+  }
+  function lecturePrompt(){
+    const src = langName(S.langOther || el.langOther.value);
+    return '以下是一場' + src + '演講的即時逐字稿，每段有' + src + '原文和即時機器翻譯（語音辨識和翻譯可能有錯字或漏字）。'
+      + '請用繁體中文（台灣用語）幫我整理：\n'
+      + '1. 三到五句的摘要\n2. 重點條列（依演講順序）\n3. 重要名詞與專有名詞的解釋\n'
+      + '4. 講者提到的數據、研究、引用或建議做法\n5. 值得追問或查證的地方\n'
+      + '翻譯和原文有出入時，以原文為準。\n\n';
+  }
+  async function copyText(text){
+    try { await navigator.clipboard.writeText(text); return true; }
+    catch {
+      const ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select();
+      let ok = false; try { ok = document.execCommand('copy'); } catch {}
+      ta.remove(); return ok;
+    }
+  }
+  $('lecShare').onclick = async () => {
+    const t = lectureTranscript();
+    if (!t) { setStatus('還沒有逐字稿'); return; }
+    const text = lecturePrompt() + t;
+    if (navigator.share) {
+      try { await navigator.share({ title: '演講逐字稿', text }); setStatus('已送出，請在 AI App 裡按送出'); return; }
+      catch (err) { if (err && err.name === 'AbortError') return; }
+    }
+    // 不支援分享 → 改成複製
+    const ok = await copyText(text);
+    setStatus(ok ? '這個瀏覽器不能直接分享，已改成複製；請打開 AI App 貼上' : '複製失敗，請改用「下載 .txt」', ok ? '' : 'err');
+  };
+  $('lecCopy').onclick = async () => {
+    const t = lectureTranscript();
+    if (!t) { setStatus('還沒有逐字稿'); return; }
+    const ok = await copyText(lecturePrompt() + t);
+    setStatus(ok ? '已複製逐字稿和整理指令（不會上傳），請打開 ChatGPT／Claude／Gemini 貼上' : '複製失敗，請改用「下載 .txt」', ok ? '' : 'err');
+  };
+  $('lecDownload').onclick = () => {
+    const t = lectureTranscript();
+    if (!t) { setStatus('還沒有逐字稿'); return; }
+    const d = new Date();
+    const name = '演講逐字稿-' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0')
+      + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0') + '.txt';
+    const url = URL.createObjectURL(new Blob(['\ufeff' + t], { type: 'text/plain;charset=utf-8' }));
+    const a = document.createElement('a'); a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    setStatus('已下載 ' + name + '（存在手機裡，不會上傳）');
+  };
+  // 情境切換：顯示對應的工具列和提示文字
+  function updateSceneUi(){
+    const lec = el.scene.value === 'lecture';
+    $('lecTools').hidden = !lec;
+    if (el.empty) el.empty.innerHTML = lec
+      ? '按下「開始口譯」，把手機朝向講者<br>逐字稿和翻譯會一直往下累積，不播語音<br>結束後可以用「AI 整理」交給你的 AI App'
+      : '按下「開始口譯」，對著手機說話<br>點一下翻譯泡泡可以放大給對方看';
+  }
+  updateSceneUi();
 
   // ---------- 一鍵對調「我的語言」和「對方語言」 ----------
   $('swapLang').onclick = async () => {
@@ -797,6 +894,12 @@
         this.bubble.querySelector('.trans').textContent = this.outText.trim();
         this.touch();
         scrollDown();
+        // 演講通常不太停頓，段落太長就在句尾分段（原文多出來的下一句開頭留給下一段）
+        if (S.lecture && this.outText.length >= (langScript(this.target) === 'Latin' ? 220 : 80)
+            && /[。？！.?!]\s*$/.test(this.outText)) {
+          this.splitParagraph();
+          return;
+        }
         // 備援：譯文和原文幾乎一樣 → 是照念原文。整句丟掉（泡泡、暫存和已排定的語音）
         if (looksLikeEcho(this.inText, this.outText)) {
           dbg('sys', this.tag + ' 譯文和原文幾乎一樣，判定為照念原文，這句丟掉：' + this.outText.trim().slice(0, 60));
@@ -811,7 +914,7 @@
         }
         if (audible) {
           S.lastOut = performance.now();
-          if (el.speak.checked) setStatus(this.q.length && !isPlaying() ? '翻譯好了，等說完再播…' : '播放翻譯中…', 'speak');
+          if (el.speak.checked && !S.lecture) setStatus(this.q.length && !isPlaying() ? '翻譯好了，等說完再播…' : '播放翻譯中…', 'speak');
           this.touch();
         }
       }
@@ -850,6 +953,16 @@
       }
       this.bubble = null; this.inText = ''; this.outText = '';
       this.turnId++; this.echoTurn = false;
+    }
+    // 演講模式分段：原文通常比譯文跑得快，最後一個句號之後的文字屬於下一段
+    splitParagraph(){
+      const m = this.inText.match(/^([\s\S]*[.?!。？！])([^.?!。？！]*)$/);
+      const carry = m ? m[2] : '';
+      if (m) this.inText = m[1];
+      if (this.bubble) this.bubble.querySelector('.orig').textContent = this.inText.trim();
+      this.resetTurn();
+      this.inText = carry;
+      this.lastInAt = performance.now();
     }
     // 自動暫停：關掉連線但保留接續 handle 和其他狀態，之後用 open(false) 重連
     suspend(){
@@ -908,7 +1021,10 @@
   // 暫停時只關連線，麥克風繼續在手機上偵測音量（不花額度）；有人說話就自動重連（帶接續 handle）。
   // 重連約要半秒，所以暫停期間一直保留最近 PREROLL_CHUNKS 包錄音，連上後先補送，第一句開頭才不會漏掉。
   const PREROLL_CHUNKS = 20;      // 2 秒
-  const autoPauseMs = () => Number(el.autoPause.value) || 0;
+  const autoPauseMs = () => {
+    const ms = Number(el.autoPause.value) || 0;
+    return ms && S.lecture ? Math.max(ms, 300000) : ms;
+  };
   function maybeAutoPause(){
     const ms = autoPauseMs();
     if (!ms || S.paused || !S.sessions.length) return;
@@ -1131,15 +1247,21 @@
       S.nextPlay = 0; S.playUntil = 0; S.silentRun = 0; S.playOwner = null;
       S.waitLogged = false; S.lastVoice = 0; S.noise = 0;
       S.paused = false; S.preroll = []; S.lastOut = 0; S.startedAt = performance.now();
-      S.pttMode = el.input.value === 'ptt'; S.ptt = null;
+      S.lecture = el.scene.value === 'lecture';
+      S.pttMode = !S.lecture && el.input.value === 'ptt'; S.ptt = null;
       await startMic();
     } catch (err) {
       setStatus('無法開啟麥克風：' + (err && err.message || err), 'err');
       stop(true); return;
     }
-    const mode = el.mode.value;
-    if (mode !== 'toMe') S.sessions.push(new Session('toOther', el.langOther.value));
-    if (mode !== 'toOther') S.sessions.push(new Session('toMe', el.langMe.value));
+    if (S.lecture) {
+      // 聽演講：只開一條「對方語言 → 我的語言」的連線，省一半額度
+      S.sessions.push(new Session('lecture', el.langMe.value));
+    } else {
+      const mode = el.mode.value;
+      if (mode !== 'toMe') S.sessions.push(new Session('toOther', el.langOther.value));
+      if (mode !== 'toOther') S.sessions.push(new Session('toMe', el.langMe.value));
+    }
     setStatus('連線中…');
     updatePttUi();
     requestWakeLock();
