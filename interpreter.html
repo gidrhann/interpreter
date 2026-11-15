@@ -49,9 +49,23 @@
   .msg.lec{max-width:100%;align-self:stretch;background:none;border-radius:0;padding:10px 4px;border-bottom:1px solid var(--line)}
   .msg.lec .orig{font-size:calc(14px * var(--fs, 1));opacity:.8;line-height:1.5;margin-bottom:6px}
   .msg.lec .trans{font-size:calc(18px * var(--fs, 1))}
-  #lecTools[hidden]{display:none}
-  #lecTools button{white-space:normal;min-width:0;font-size:13px;line-height:1.25}
   .tools button{min-width:0}
+  /* 分享選單（從下方滑出的面板） */
+  #shareSheet{position:fixed;inset:0;z-index:20;background:rgba(2,6,23,.6);display:flex;align-items:flex-end;justify-content:center}
+  #shareSheet[hidden]{display:none}
+  #shareSheet .sheet{width:100%;max-width:560px;max-height:88vh;overflow-y:auto;background:var(--panel);
+    border-radius:18px 18px 0 0;border:1px solid var(--line);border-bottom:none;
+    padding:14px 16px calc(18px + env(safe-area-inset-bottom))}
+  #shareSheet .sheet-head{display:flex;align-items:center;justify-content:space-between}
+  #shareSheet h2{font-size:17px;margin:0}
+  #shareSheet h3{font-size:14px;color:var(--accent);margin:16px 0 6px}
+  #shareSheet .note{margin-top:6px}
+  #shareSheet .sheet-row,#shareSheet .sheet-grid{display:grid;gap:8px;grid-template-columns:1fr 1fr}
+  #shareSheet .sheet-row.one{grid-template-columns:1fr}
+  #shareSheet .sheet-row .iconbtn,#shareSheet .sheet-grid .iconbtn{display:flex;align-items:center;justify-content:center;
+    text-align:center;text-decoration:none;min-height:46px;padding:8px;font-size:15px;line-height:1.3}
+  #shareSheet .iconbtn[hidden]{display:none}
+  #shareSheet .check{margin-top:4px;font-size:14px}
   .msg .live-trans{font-size:calc(12px * var(--fs, 1));opacity:.6;margin-top:6px;line-height:1.4}
   .msg.polishing .trans::after{content:" ⋯";opacity:.6}
   footer{padding:12px 16px 16px;border-top:1px solid var(--line)}
@@ -175,20 +189,48 @@
     <button id="pttThem">按住：對方說</button>
   </div>
   <button id="main">開始口譯</button>
-  <div class="tools" id="lecTools" hidden>
-    <button class="iconbtn" id="lecShare">AI 整理（分享）</button>
-    <button class="iconbtn" id="lecCopy">複製＋整理指令</button>
-    <button class="iconbtn" id="lecDownload">下載 .txt</button>
-  </div>
   <div class="tools">
     <button class="iconbtn narrow" id="fontDown" title="字小一點" aria-label="字小一點">A−</button>
     <button class="iconbtn narrow" id="fontUp" title="字大一點" aria-label="字大一點">A＋</button>
-    <button class="iconbtn" id="copyLog">複製紀錄</button>
+    <button class="iconbtn" id="shareBtn">分享</button>
     <button class="iconbtn" id="clear">清除紀錄</button>
   </div>
 </footer>
 
 <div id="overlay"><div id="overlayText"></div><small>點一下關閉</small></div>
+
+<!-- 分享選單：存成檔案／Google 文件／交給 AI。全部都不經過這個 App 的伺服器 -->
+<div id="shareSheet" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="shareTitle">
+    <div class="sheet-head"><h2 id="shareTitle">分享紀錄</h2><button class="iconbtn" id="shareClose">關閉</button></div>
+    <p class="note" id="shareInfo"></p>
+
+    <h3>存成檔案</h3>
+    <div class="sheet-row" id="fileRow">
+      <button class="iconbtn" id="shareFile">存到「檔案」或其他 App</button>
+      <button class="iconbtn" id="shareDownload">下載 .txt</button>
+    </div>
+
+    <h3>Google 文件</h3>
+    <div class="sheet-row one">
+      <a class="iconbtn" id="shareDocs" href="https://docs.new" target="_blank" rel="noopener">開一份新的 Google 文件</a>
+    </div>
+    <p class="note">會先複製紀錄，文件開好後在內文長按「貼上」（電腦按 Ctrl＋V）。</p>
+
+    <h3>交給 AI 整理</h3>
+    <label class="check"><input type="checkbox" id="sharePrompt" checked> 加上整理指令（摘要、重點條列…）</label>
+    <div class="sheet-grid">
+      <a class="iconbtn aiLink" data-ai="ChatGPT" href="https://chatgpt.com/" target="_blank" rel="noopener">ChatGPT</a>
+      <a class="iconbtn aiLink" data-ai="Claude" href="https://claude.ai/new" target="_blank" rel="noopener">Claude</a>
+      <a class="iconbtn aiLink" data-ai="Gemini" href="https://gemini.google.com/app" target="_blank" rel="noopener">Gemini</a>
+      <button class="iconbtn" id="shareApp">其他 App（分享選單）</button>
+    </div>
+    <p class="note">會先複製，打開後在輸入框長按「貼上」再送出。用的是你自己的帳號和訂閱。</p>
+
+    <h3>其他</h3>
+    <div class="sheet-row one"><button class="iconbtn" id="shareCopy">只複製紀錄</button></div>
+  </div>
+</div>
 
 <script>
 (() => {
@@ -538,35 +580,28 @@
   $('fontUp').onclick = () => { if (fontIdx < FONT_STEPS.length - 1) { fontIdx++; applyFont(); scrollDown(); } };
   applyFont();
 
-  // ---------- 複製全部紀錄：只放進剪貼簿，不會送到任何伺服器 ----------
-  $('copyLog').onclick = async () => {
-    const lines = [...el.log.querySelectorAll('.msg')].map(m => {
+  // ---------- 分享：存成檔案／Google 文件／交給 AI ----------
+  // 這個 App 不呼叫任何 API、不上傳：檔案走手機分享選單或直接下載；Google 文件和 AI 是「先複製、再開網頁或 App」，
+  // 用使用者自己的帳號和訂閱。一小時的逐字稿會超過網址長度上限，所以不用網址帶文字。
+  function conversationText(msgs){
+    const lines = msgs.map(m => {
       const who = m.querySelector('.who').textContent;
       const orig = m.querySelector('.orig').textContent.trim();
       const live = m.querySelector('.live-trans');
       const trans = m.querySelector('.trans').textContent.trim() + (live ? '\n即時翻譯：' + live.textContent.replace(/^即時：/, '').trim() : '');
       return ['[' + (m.dataset.time || '') + '] ' + who, '原文：' + orig, '翻譯：' + trans].join('\n');
     });
-    if (!lines.length) { setStatus('還沒有對話紀錄可以複製'); return; }
-    const text = '即時口譯紀錄 ' + new Date().toLocaleDateString('zh-TW') + '\n\n' + lines.join('\n\n');
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // 舊瀏覽器備援
-      const ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', '');
-      ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select();
-      try { document.execCommand('copy'); } catch {}
-      ta.remove();
-    }
-    setStatus('已複製 ' + lines.length + ' 則對話到剪貼簿（不會上傳）', S.running ? 'on' : '');
-  };
-
-  // ---------- 演講模式：把逐字稿交給使用者自己的 AI App 整理 ----------
-  // 不呼叫任何 API：用手機分享選單送到 ChatGPT／Claude／Gemini App（使用者原本的訂閱），
-  // 或複製後自己貼上、或下載成 .txt。一小時的逐字稿太長，不用網址帶參數。
-  function lectureTranscript(){
-    const paras = [...el.log.querySelectorAll('.msg')];
-    if (!paras.length) return '';
+    return '即時口譯紀錄 ' + new Date().toLocaleDateString('zh-TW') + '\n\n' + lines.join('\n\n');
+  }
+  function conversationPrompt(){
+    const me = langName(S.langMe || el.langMe.value), other = langName(S.langOther || el.langOther.value);
+    return '以下是一段' + me + '和' + other + '的雙語對話紀錄，由即時口譯 App 產生（語音辨識和翻譯可能有錯字或漏字）。'
+      + '「我」說的是' + me + '，「對方」說的是' + other + '。請用繁體中文（台灣用語）幫我整理：\n'
+      + '1. 三到五句的對話摘要\n2. 對方提到的重點（問題、狀況、需求）\n3. 我說明或交代的事項\n'
+      + '4. 翻譯可能有誤、需要再確認的地方\n'
+      + '翻譯和原文有出入時，以原文為準。\n\n';
+  }
+  function lectureTranscript(paras){
     const src = langName(S.langOther || el.langOther.value), tgt = langName(S.langMe || el.langMe.value);
     const body = paras.map(m => {
       const orig = m.querySelector('.orig').textContent.trim();
@@ -583,51 +618,128 @@
       + '4. 講者提到的數據、研究、引用或建議做法\n5. 值得追問或查證的地方\n'
       + '翻譯和原文有出入時，以原文為準。\n\n';
   }
-  async function copyText(text){
-    try { await navigator.clipboard.writeText(text); return true; }
-    catch {
-      const ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', '');
-      ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select();
-      let ok = false; try { ok = document.execCommand('copy'); } catch {}
-      ta.remove(); return ok;
-    }
+  // 依畫面上的紀錄決定格式（不看目前的情境設定：錄完才切換情境，格式也不會錯）
+  function record(){
+    const msgs = [...el.log.querySelectorAll('.msg')];
+    if (!msgs.length) return null;
+    const lec = msgs.some(m => m.classList.contains('lec'));
+    return {
+      lec, count: msgs.length,
+      title: lec ? '演講逐字稿' : '口譯紀錄',
+      text: lec ? lectureTranscript(msgs) : conversationText(msgs),
+      prompt: lec ? lecturePrompt() : conversationPrompt()
+    };
   }
-  $('lecShare').onclick = async () => {
-    const t = lectureTranscript();
-    if (!t) { setStatus('還沒有逐字稿'); return; }
-    const text = lecturePrompt() + t;
-    if (navigator.share) {
-      try { await navigator.share({ title: '演講逐字稿', text }); setStatus('已送出，請在 AI App 裡按送出'); return; }
-      catch (err) { if (err && err.name === 'AbortError') return; }
-    }
-    // 不支援分享 → 改成複製
-    const ok = await copyText(text);
-    setStatus(ok ? '這個瀏覽器不能直接分享，已改成複製；請打開 AI App 貼上' : '複製失敗，請改用「下載 .txt」', ok ? '' : 'err');
-  };
-  $('lecCopy').onclick = async () => {
-    const t = lectureTranscript();
-    if (!t) { setStatus('還沒有逐字稿'); return; }
-    const ok = await copyText(lecturePrompt() + t);
-    setStatus(ok ? '已複製逐字稿和整理指令（不會上傳），請打開 ChatGPT／Claude／Gemini 貼上' : '複製失敗，請改用「下載 .txt」', ok ? '' : 'err');
-  };
-  $('lecDownload').onclick = () => {
-    const t = lectureTranscript();
-    if (!t) { setStatus('還沒有逐字稿'); return; }
-    const d = new Date();
-    const name = '演講逐字稿-' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0')
-      + '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0') + '.txt';
-    const url = URL.createObjectURL(new Blob(['\ufeff' + t], { type: 'text/plain;charset=utf-8' }));
+  function legacyCopy(text){
+    const ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch {}
+    ta.remove(); return ok;
+  }
+  // 要在點擊當下就開始複製（前面不能先 await 別的東西），手機瀏覽器才會允許寫入剪貼簿
+  function copyText(text){
+    if (navigator.clipboard && window.isSecureContext)
+      return navigator.clipboard.writeText(text).then(() => true, () => legacyCopy(text));
+    return Promise.resolve(legacyCopy(text));
+  }
+  function fileName(rec){
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    return rec.title + '-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes()) + '.txt';
+  }
+  // 開頭加 BOM，Windows 記事本才不會把中文判成亂碼
+  const txtBlob = t => new Blob([String.fromCharCode(0xFEFF) + t], { type: 'text/plain;charset=utf-8' });
+  function downloadTxt(rec){
+    const name = fileName(rec);
+    const url = URL.createObjectURL(txtBlob(rec.text));
     const a = document.createElement('a'); a.href = url; a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
-    setStatus('已下載 ' + name + '（存在手機裡，不會上傳）');
+    return name;
+  }
+  function canShareFile(){
+    try { return !!(navigator.canShare && navigator.canShare({ files: [new File(['x'], 'x.txt', { type: 'text/plain' })] })); }
+    catch { return false; }
+  }
+
+  const sheet = $('shareSheet'), sharePrompt = $('sharePrompt');
+  let shareRec = null;
+  const report = (text, kind) => setStatus(text, kind || (S.running ? 'on' : ''));
+  const current = () => record() || shareRec;      // 口譯可能還在進行，按下去的當下再抓一次最新紀錄
+  const withPrompt = rec => (sharePrompt.checked ? rec.prompt : '') + rec.text;
+  sharePrompt.checked = store.get('sharePrompt', '1') === '1';
+  sharePrompt.onchange = () => store.set('sharePrompt', sharePrompt.checked ? '1' : '0');
+
+  function openShare(){
+    shareRec = record();
+    if (!shareRec) { report('還沒有紀錄可以分享'); return; }
+    $('shareInfo').textContent = (shareRec.lec ? '演講逐字稿，共 ' + shareRec.count + ' 段。' : '對話紀錄，共 ' + shareRec.count + ' 則。')
+      + '這個 App 不會上傳；送到 Google 或 AI 之後，就依該服務的規定處理。';
+    const fileOk = canShareFile();
+    $('shareFile').hidden = !fileOk;
+    $('fileRow').classList.toggle('one', !fileOk);
+    $('shareApp').hidden = !navigator.share;
+    sheet.hidden = false;
+  }
+  function closeShare(){ sheet.hidden = true; }
+  $('shareBtn').onclick = openShare;
+  $('shareClose').onclick = closeShare;
+  sheet.addEventListener('click', e => { if (e.target === sheet) closeShare(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !sheet.hidden) closeShare(); });
+
+  // 存成檔案：手機分享選單（iPhone 有「儲存到檔案」，Android 有雲端硬碟等），不能用就直接下載
+  $('shareFile').onclick = async () => {
+    const rec = current(), name = fileName(rec);
+    try {
+      await navigator.share({ files: [new File([txtBlob(rec.text)], name, { type: 'text/plain' })] });
+      closeShare(); report('已交給分享選單：' + name);
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;   // 使用者自己取消
+      closeShare(); report('這裡不能用分享選單，已改成下載 ' + downloadTxt(rec));
+    }
   };
-  // 情境切換：顯示對應的工具列和提示文字
+  $('shareDownload').onclick = () => {
+    const name = downloadTxt(current());
+    closeShare(); report('已下載 ' + name + '（存在這台裝置，不會上傳）');
+  };
+
+  // Google 文件、ChatGPT、Claude、Gemini：是真正的連結（target=_blank），點下去先複製、再讓瀏覽器照常開啟，
+  // 手機才不會把「程式開的視窗」當成彈出式視窗擋掉。
+  $('shareDocs').onclick = () => {
+    const rec = current();
+    copyText(rec.text).then(ok => report(ok ? '已複製紀錄，請在新的 Google 文件內文貼上' : '複製失敗，請改用「下載 .txt」', ok ? '' : 'err'));
+    closeShare();
+  };
+  for (const a of document.querySelectorAll('.aiLink')) a.onclick = () => {
+    const rec = current(), ai = a.dataset.ai, withP = sharePrompt.checked;
+    copyText(withPrompt(rec)).then(ok => report(ok
+      ? '已複製' + (withP ? '紀錄和整理指令' : '紀錄') + '，請在 ' + ai + ' 的輸入框貼上後送出'
+      : '複製失敗，請改用「其他 App」或「下載 .txt」', ok ? '' : 'err'));
+    closeShare();
+  };
+  $('shareApp').onclick = async () => {
+    const rec = current(), text = withPrompt(rec);
+    try {
+      await navigator.share({ title: rec.title, text });
+      closeShare(); report('已送出，請在 App 裡按送出');
+    } catch (err) {
+      if (err && err.name === 'AbortError') return;
+      const ok = await copyText(text); closeShare();
+      report(ok ? '這裡不能用分享選單，已改成複製，請打開 App 貼上' : '複製失敗，請改用「下載 .txt」', ok ? '' : 'err');
+    }
+  };
+  $('shareCopy').onclick = () => {
+    const rec = current();
+    copyText(rec.text).then(ok => report(ok
+      ? '已複製 ' + rec.count + (rec.lec ? ' 段逐字稿' : ' 則對話') + '到剪貼簿（不會上傳）'
+      : '複製失敗，請改用「下載 .txt」', ok ? '' : 'err'));
+    closeShare();
+  };
+
+  // 情境切換：提示文字
   function updateSceneUi(){
     const lec = el.scene.value === 'lecture';
-    $('lecTools').hidden = !lec;
     if (el.empty) el.empty.innerHTML = lec
-      ? '按下「開始口譯」，把手機朝向講者<br>逐字稿和翻譯會一直往下累積，不播語音<br>結束後可以用「AI 整理」交給你的 AI App'
+      ? '按下「開始口譯」，把手機朝向講者<br>逐字稿和翻譯會一直往下累積，不播語音<br>結束後可以按「分享」存檔或交給你的 AI App'
       : '按下「開始口譯」，對著手機說話<br>點一下翻譯泡泡可以放大給對方看';
   }
   updateSceneUi();

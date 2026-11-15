@@ -41,6 +41,11 @@
 - 實測每句約 2～3 秒、約 80 token；`thinkingConfig.thinkingLevel: 'MINIMAL'` 可用。不要送 `temperature`（3.6+ 會忽略並警告）。
 - 每句泡泡收尾（`resetTurn`）時送原文逐字稿；照念原文被丟掉的句子不送。429 時暫停潤飾 1 分鐘。
 
+## 分享選單
+
+- 「分享」鍵的規格與尚未實測項目見 `PLAN.md`「新功能：分享」。
+- 剪貼簿寫入要在點擊當下同步開始（`copyText()` 不能放在別的 `await` 後面），手機瀏覽器才允許。
+
 ## 測試小技巧
 
 - 瀏覽器窗格沒有麥克風，也不能輸入真的 key。可以在頁面載入後用 JS 替換 `navigator.mediaDevices.getUserMedia`（OscillatorNode 當假麥克風）和 `window.WebSocket`（假伺服器），因為 app 是在按「開始」時才使用它們。
