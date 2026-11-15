@@ -215,7 +215,7 @@
     <div class="sheet-row one">
       <a class="iconbtn" id="shareDocs" href="https://docs.new" target="_blank" rel="noopener">開一份新的 Google 文件</a>
     </div>
-    <p class="note">會先複製紀錄，文件開好後在內文長按「貼上」（電腦按 Ctrl＋V）。</p>
+    <p class="note" id="docsNote">會先複製紀錄，文件開好後在內文長按「貼上」（電腦按 Ctrl＋V）。</p>
 
     <h3>交給 AI 整理</h3>
     <label class="check"><input type="checkbox" id="sharePrompt" checked> 加上整理指令（摘要、重點條列…）</label>
@@ -678,6 +678,7 @@
     $('shareFile').hidden = !fileOk;
     $('fileRow').classList.toggle('one', !fileOk);
     $('shareApp').hidden = !navigator.share;
+    setupDocsButton();
     sheet.hidden = false;
   }
   function closeShare(){ sheet.hidden = true; }
@@ -704,9 +705,24 @@
 
   // Google 文件、ChatGPT、Claude、Gemini：是真正的連結（target=_blank），點下去先複製、再讓瀏覽器照常開啟，
   // 手機才不會把「程式開的視窗」當成彈出式視窗擋掉。
-  $('shareDocs').onclick = () => {
-    const rec = current();
-    copyText(rec.text).then(ok => report(ok ? '已複製紀錄，請在新的 Google 文件內文貼上' : '複製失敗，請改用「下載 .txt」', ok ? '' : 'err'));
+  // iPhone／iPad：有裝 Google 文件 App 時，docs.new 和 docs.google.com 的網址都會被 App 接走，
+  // App 不認得「新增文件」和「文件列表」網址，只會跳「找不到檔案」（2026-11-16 使用者 iPhone 實測）。
+  // 所以 iOS 不跳轉，只複製，請使用者自己在 App 裡按＋新增文件後貼上。
+  const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);   // iPadOS 會假裝成 Mac
+  function setupDocsButton(){
+    const ios = isIOS();
+    $('shareDocs').textContent = ios ? '複製紀錄，到 Google 文件 App 貼上' : '開一份新的 Google 文件';
+    $('docsNote').textContent = ios
+      ? 'iPhone 上 Google 文件 App 打不開「新文件」連結，所以只複製：請打開 Google 文件 App，按右下角＋ →「新文件」，在內文長按「貼上」。'
+      : '會先複製紀錄，文件開好後在內文長按「貼上」（電腦按 Ctrl＋V）。';
+  }
+  $('shareDocs').onclick = e => {
+    const rec = current(), ios = isIOS();
+    if (ios) e.preventDefault();
+    copyText(rec.text).then(ok => report(ok
+      ? (ios ? '已複製紀錄：請打開 Google 文件 App，按＋ →「新文件」後貼上' : '已複製紀錄，請在新的 Google 文件內文貼上')
+      : '複製失敗，請改用「下載 .txt」', ok ? '' : 'err'));
     closeShare();
   };
   for (const a of document.querySelectorAll('.aiLink')) a.onclick = () => {

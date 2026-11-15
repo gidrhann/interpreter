@@ -149,6 +149,9 @@ repo 根目錄已經有 `interpreter.html`，是一個不需要建置的單一 H
   - **存成檔案**：`navigator.share({ files })` 交給手機分享選單（iPhone「儲存到檔案」、Android 雲端硬碟等），
     不支援就直接下載；另有「下載 .txt」。檔案開頭有 BOM。
   - **Google 文件**：先複製紀錄，再開 `https://docs.new`，使用者自己貼上。沒有用 Google 登入／Drive API。
+    **iPhone／iPad 不跳轉、只複製**（2026-11-16 實測）：有裝 Google 文件 App 時，`docs.new` 和
+    `docs.google.com/document/u/0/` 都會被 App 接走並跳「找不到檔案」。所以 iOS 上按鈕改成「複製紀錄，到 Google 文件 App 貼上」，
+    說明請使用者打開 App → ＋ →「新文件」→ 貼上。
   - **交給 AI 整理**：ChatGPT（chatgpt.com）、Claude（claude.ai/new）、Gemini（gemini.google.com/app）各一顆，
     先複製「整理指令＋紀錄」再開網頁；「其他 App」走分享選單。整理指令可勾選關掉（存在 localStorage）。
     看診對話和演講各一套整理指令。不用網址帶文字（長紀錄會超過網址長度）。
@@ -156,7 +159,8 @@ repo 根目錄已經有 `interpreter.html`，是一個不需要建置的單一 H
 - Google 文件和 AI 按鈕是真正的 `<a target="_blank">`，點擊時同步開始複製、不攔截預設動作，避免手機擋彈出視窗。
 - 已在瀏覽器窗格用假紀錄驗證：兩種格式的文字、整理指令開關、下載檔名與 BOM、分享選單（以假 `navigator.share` 模擬）、
   取消分享時選單維持開啟、手機寬度版面。
-- **尚未實測**：iPhone／Android 上分享選單是否出現「儲存到檔案」、從主畫面開的 App 點 AI 連結會不會跳到已安裝的 App、
+- **尚未實測**：iPhone 上「Google 文件」改成只複製之後的流程、iPhone 主畫面 App 裡「下載 .txt」會不會切到回不去的預覽畫面
+  （同類問題見使用者制度帳本 L-158，可能要在觸控裝置隱藏這顆）、iPhone／Android 上分享選單是否出現「儲存到檔案」、從主畫面開的 App 點 AI 連結會不會跳到已安裝的 App、
   剪貼簿在手機上是否成功。
 - 之後可選：用 Google 登入＋Drive API（`drive.file`）直接建立 Google 文件，需要 Google Cloud 專案與 OAuth 設定。
 
