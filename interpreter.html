@@ -670,6 +670,10 @@
   sharePrompt.onchange = () => store.set('sharePrompt', sharePrompt.checked ? '1' : '0');
 
   function openShare(){
+    try { openShareInner(); }
+    catch (err) { report('分享選單打不開：' + (err && (err.name + ' ' + err.message) || err), 'err'); }
+  }
+  function openShareInner(){
     shareRec = record();
     if (!shareRec) { report('還沒有紀錄可以分享'); return; }
     $('shareInfo').textContent = (shareRec.lec ? '演講逐字稿，共 ' + shareRec.count + ' 段。' : '對話紀錄，共 ' + shareRec.count + ' 則。')
@@ -687,16 +691,34 @@
   sheet.addEventListener('click', e => { if (e.target === sheet) closeShare(); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape' && !sheet.hidden) closeShare(); });
 
-  // 存成檔案：手機分享選單（iPhone 有「儲存到檔案」，Android 有雲端硬碟等），不能用就直接下載
-  $('shareFile').onclick = async () => {
+  // 叫出系統分享選單。一定要先關掉自己的選單再叫：iOS 的 navigator.share 常常分享完了 promise 卻一直不結束
+  // （WebKit bug 216913），如果等它結束才關，自己的選單會一直留著蓋住下方工具列，
+  // 回到 App 後「分享」鍵就按不到（2026-11-16 使用者 iPhone 實測：第一次分享成功，之後按「分享」沒反應）。
+  // 上一次的 promise 卡住時，下一次呼叫會馬上被拒（InvalidStateError 之類），交給 onFail 改用備援。
+  function systemShare(data, onDone, onFail){
+    closeShare();
+    let p;
+    try { p = navigator.share(data); } catch (err) { p = Promise.reject(err); }
+    p.then(onDone, err => {
+      if (err && err.name === 'AbortError') { report('已取消分享'); return; }   // 使用者自己取消
+      dbg('err', '[分享] navigator.share 失敗：' + (err && (err.name + ' ' + err.message) || err));
+      onFail(err);
+    });
+  }
+  const errName = err => (err && err.name) || '未知錯誤';
+
+  // 存成檔案：手機分享選單（iPhone 有「儲存到檔案」，Android 有雲端硬碟等）
+  $('shareFile').onclick = () => {
     const rec = current(), name = fileName(rec);
-    try {
-      await navigator.share({ files: [new File([txtBlob(rec.text)], name, { type: 'text/plain' })] });
-      closeShare(); report('已交給分享選單：' + name);
-    } catch (err) {
-      if (err && err.name === 'AbortError') return;   // 使用者自己取消
-      closeShare(); report('這裡不能用分享選單，已改成下載 ' + downloadTxt(rec));
-    }
+    systemShare({ files: [new File([txtBlob(rec.text)], name, { type: 'text/plain' })] },
+      () => report('已交給分享選單：' + name),
+      err => {
+        // iPhone 主畫面 App 裡直接下載會切到回不來的預覽畫面，所以 iOS 改成複製
+        if (isIOS()) copyText(rec.text).then(ok => report(ok
+          ? '叫不出分享選單（' + errName(err) + '），已改成複製紀錄，可以貼到「備忘錄」等 App'
+          : '叫不出分享選單（' + errName(err) + '），請把口譯 App 關掉重開再試', 'err'));
+        else report('叫不出分享選單（' + errName(err) + '），已改成下載 ' + downloadTxt(rec));
+      });
   };
   $('shareDownload').onclick = () => {
     const name = downloadTxt(current());
@@ -732,16 +754,13 @@
       : '複製失敗，請改用「其他 App」或「下載 .txt」', ok ? '' : 'err'));
     closeShare();
   };
-  $('shareApp').onclick = async () => {
+  $('shareApp').onclick = () => {
     const rec = current(), text = withPrompt(rec);
-    try {
-      await navigator.share({ title: rec.title, text });
-      closeShare(); report('已送出，請在 App 裡按送出');
-    } catch (err) {
-      if (err && err.name === 'AbortError') return;
-      const ok = await copyText(text); closeShare();
-      report(ok ? '這裡不能用分享選單，已改成複製，請打開 App 貼上' : '複製失敗，請改用「下載 .txt」', ok ? '' : 'err');
-    }
+    systemShare({ title: rec.title, text },
+      () => report('已送出，請在 App 裡按送出'),
+      err => copyText(text).then(ok => report(ok
+        ? '叫不出分享選單（' + errName(err) + '），已改成複製，請打開 App 貼上'
+        : '叫不出分享選單（' + errName(err) + '），請改用上面的 ChatGPT／Claude／Gemini 按鈕', ok ? '' : 'err')));
   };
   $('shareCopy').onclick = () => {
     const rec = current();
