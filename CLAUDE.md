@@ -45,7 +45,7 @@
 
 - 「分享」鍵的規格與尚未實測項目見 `PLAN.md`「新功能：分享」。
 - 剪貼簿寫入要在點擊當下同步開始（`copyText()` 不能放在別的 `await` 後面），手機瀏覽器才允許。
-- 不要 `await navigator.share()` 之後才關畫面上的東西：iOS 已知分享完 promise 可能不結束（WebKit bug 216913；2026-11-16 使用者 iPhone 回報「分享一次後按不到分享鍵」，推測是這個原因），一律先關再叫（`systemShare()`）。
+- 不要 `await navigator.share()` 之後才關畫面上的東西：iOS 已知分享完 promise 可能不結束（WebKit bug 216913；2026-11-16 使用者 iPhone 回報「分享一次後按不到分享鍵」，推測是這個原因；改成先關再叫之後，使用者 iPhone 實測可以連續分享），一律先關再叫（`systemShare()`）。
 
 ## 測試小技巧
 
